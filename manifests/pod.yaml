@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata: 
+  name: user-pods-backend-testing
+  labels:
+    app: user-pods-backend-testing
+spec:
+  serviceAccountName: user-pods-backend
+  containers:
+    - name: user-pods-backend-testing
+      image: kube.sciencedata.dk:5000/user_pods_backend_testing
+      ports:
+        - containerPort: 22
+          protocol: TCP
+        - containerPort: 80
+          protocol: TCP
+      securityContext:
+        capabilities:
+          add:
+            - "SYS_CHROOT"
+            - "AUDIT_WRITE"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-pods-backend-testing-ssh
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 22
+      targetPort: 22
+      name: ssh
+      protocol: TCP
+  selector:
+    app: user-pods-backend-testing
+  externalIPs:
+    - 130.226.137.130
