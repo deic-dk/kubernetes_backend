@@ -1,32 +1,44 @@
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: sciencedata-dev
+  labels:
+    name: sciencedata-dev
+
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
-        name: user-pods-backend
+  name: user-pods-backend
+  namespace: sciencedata-dev
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-        name: modify-pods
+  name: modify-pods-services
+  namespace: sciencedata-dev
 rules:
-        - apiGroups: [""]
-          resources:
-                  - pods
-          verbs:
-                  - get
-                  - list
-                  - delete 
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+    verbs:
+      - get
+      - list
+      - delete 
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-        name: modify-pods-to-sa
+  name: modify-pods-to-sa
+  namespace: sciencedata-dev
 subjects:
-        - kind: ServiceAccount
-          name: user-pods-backend
+  - kind: ServiceAccount
+    name: user-pods-backend
 roleRef:
-        kind: Role
-        name: modify-pods
-        apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: modify-pods-services 
+  apiGroup: rbac.authorization.k8s.io
 

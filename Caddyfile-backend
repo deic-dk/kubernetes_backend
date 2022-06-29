@@ -1,0 +1,10 @@
+{
+	auto_https off
+	admin off
+}
+
+http://10.0.0.12:22080
+
+reverse_proxy {
+	to PODIP:80
+}
