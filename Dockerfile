@@ -1,15 +1,25 @@
 FROM ubuntu:22.04
 
+USER root
+
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get -y install \
-    golang \
     openssh-server \
     rsync \
     vim \
-    less \
+    net-tools \
+    iproute2 \
+    ca-certificates \
+    curl
 
-USER root
 
+# unminimize the ubuntu image
+RUN sed -i 's/^read.*//g' /usr/local/sbin/unminimize && \
+    sed -i 's/exit 1/echo "skip"/g' /usr/local/sbin/unminimize && \
+    sed -i 's/apt-get upgrade/apt-get upgrade -y/g' /usr/local/sbin/unminimize && \
+    /usr/local/sbin/unminimize
+
+# Copy ssh keys
 RUN mkdir -p /root/.ssh && \
     echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n" > /root/.ssh/authorized_keys && \
     chmod go-rwx /root/.ssh && \
@@ -17,6 +27,18 @@ RUN mkdir -p /root/.ssh && \
     $(ssh-keygen -l -f /etc/ssh/ssh_host_rsa_key.pub | sed -E 's|.*SHA256:(.*) root.*|\1|') >/tmp/hostkeys && \
     service ssh start
 
-ADD ["src", "/opt/user_pods_backend"]
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+    curl -LO "https://dl.k8s.io/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl.sha256" && \
+    echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check && \
+    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
+    rm kubectl kubectl.sha256
+
+# Set up go debug environment
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y golang && \
+    echo 'export PATH="$PATH:/root/go/bin"' >> /root/.bashrc && \
+    go install github.com/go-delve/delve/cmd/dlv@latest
+
+ADD ["src", "/root/go/src/user_pods_k8s_backend/src"]
 
 CMD ["/usr/sbin/sshd", "-D"]
