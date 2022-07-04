@@ -3,6 +3,7 @@ module github.com/deic.dk/user_pods_k8s_backend
 go 1.18
 
 require (
+	k8s.io/api v0.19.0
 	k8s.io/apimachinery v0.19.0
 	k8s.io/client-go v0.19.0
 )
@@ -27,7 +28,6 @@ require (
 	google.golang.org/protobuf v1.24.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.2.8 // indirect
-	k8s.io/api v0.19.0 // indirect
 	k8s.io/klog/v2 v2.2.0 // indirect
 	k8s.io/utils v0.0.0-20200729134348-d5654de09c73 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.0.1 // indirect
