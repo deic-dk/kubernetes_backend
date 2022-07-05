@@ -2,39 +2,48 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
-	"encoding/json"
 
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
 
 // TODO figure out how to get the namespace automatically from within the pod where this runs
-const ns = "sciencedata-dev"
+const namespace = "sciencedata-dev"
+const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-dk\\/pod_manifests"
 
 type GetPodsResponse struct {
-	PodName string
-	ContainerName string
-	ImageName string
-	PodIP string
-	NodeIP string
-	Owner string
-	Age string
-	Status string
+	PodName        string
+	ContainerName  string
+	ImageName      string
+	PodIP          string
+	NodeIP         string
+	Owner          string
+	Age            string
+	Status         string
 	Ed25519Hostkey string
-	RsaHostkey string
-	Url string
-	SshUrl string
+	RsaHostkey     string
+	Url            string
+	SshUrl         string
 }
 
-//type CreatePodSettings struct {
-//}
+type CreatePodRequest struct {
+	YamlURL string `json:"yaml_url"`
+	UserID  string `json:"user_id"`
+	//Settings[container_name][env_var_name] = env_var_value
+	Settings map[string]map[string]string `json:"settings"`
+}
 
 func getPodClient() v1.PodInterface {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
@@ -47,14 +56,14 @@ func getPodClient() v1.PodInterface {
 	if err != nil {
 		panic(err.Error())
 	}
-	return clientset.CoreV1().Pods(ns)
+	return clientset.CoreV1().Pods(namespace)
 }
 
 func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 	return &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: ns,
+			Namespace: namespace,
 			Labels: map[string]string{
 				"user":   user,
 				"domain": domain,
@@ -80,7 +89,7 @@ func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 //func createPod(manifestURL string, settings struct) (*apiv1.Pod, error) {
 //}
 
-func getPods(username string) []GetPodsResponse{
+func getPods(username string) []GetPodsResponse {
 	user, domain, _ := strings.Cut(username, "@")
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
 	podclient := getPodClient()
@@ -89,10 +98,10 @@ func getPods(username string) []GetPodsResponse{
 		panic(err.Error())
 	}
 	var response []GetPodsResponse
-	for i, n := range podlist.Items {
+	for _, n := range podlist.Items {
 		var pod GetPodsResponse
 		var ageSec = time.Now().Sub(n.Status.StartTime.Time).Seconds()
-		pod.Age = fmt.Sprintf("%d:%d:%d", int32(ageSec / 3600), int32(ageSec / 60) % 60, int32(ageSec) % 60)
+		pod.Age = fmt.Sprintf("%d:%d:%d", int32(ageSec/3600), int32(ageSec/60)%60, int32(ageSec)%60)
 		pod.ContainerName = n.Spec.Containers[0].Name
 		pod.ImageName = n.Spec.Containers[0].Image
 		pod.NodeIP = n.Status.HostIP
@@ -125,7 +134,53 @@ func createExamplePod(name string, user string, domain string) (*apiv1.Pod, erro
 	return result, err
 }
 
+func getYaml(url string) (string, error) {
+	allowed, err := regexp.MatchString(whitelistYamlURLRegex, url)
+	if err != nil {
+		return "", err
+	}
+	if allowed {
+		response, err := http.Get(url)
+		if err != nil {
+			return "", errors.New(fmt.Sprintf("Could not fetch manifest from given url: %s", url))
+		}
+		defer response.Body.Close()
+
+		body, err := ioutil.ReadAll(response.Body)
+		if err != nil {
+			return "", errors.New(fmt.Sprintf("Could not parse manifest from given url: %s", url))
+		}
+
+		return string(body), nil
+	} else {
+		return "", errors.New(fmt.Sprintf("YamlURL %s not matched to whitelist", url))
+	}
+}
+
+func parsePost(w http.ResponseWriter, r *http.Request) {
+	var request CreatePodRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+
+	//jsonvalue, _ := json.Marshal(req)
+	fmt.Printf("REQUEST: %+v\n", request)
+
+	yaml, err := getYaml(request.YamlURL)
+	if err != nil {
+		fmt.Printf("ERROR: %s", err.Error())
+		return
+	}
+	fmt.Printf("yaml:\n%s\n", yaml)
+	decode := scheme.Codecs.UniversalDeserializer().Decode
+	object, groupVersionKind, err := decode([]byte(yaml), nil, nil)
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	fmt.Printf("OBJECT:\n%+v\nGVK:\n%+v\n", object, groupVersionKind)
+}
+
 func main() {
-	http.HandleFunc("/", serveGetPods)
+	http.HandleFunc("/get_pods", serveGetPods)
+	http.HandleFunc("/parse", parsePost)
 	http.ListenAndServe(":80", nil)
 }
