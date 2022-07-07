@@ -13,6 +13,9 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	//	"k8s.io/apimachinery/pkg/runtime/schema"
+	//	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -22,6 +25,8 @@ import (
 // TODO figure out how to get the namespace automatically from within the pod where this runs
 const namespace = "sciencedata-dev"
 const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-dk\\/pod_manifests"
+const sciencedataPrivateNet = "10.2."
+const sciencedataInternalNet = "10.0."
 
 type GetPodsResponse struct {
 	PodName        string
@@ -86,9 +91,6 @@ func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 	}
 }
 
-//func createPod(manifestURL string, settings struct) (*apiv1.Pod, error) {
-//}
-
 func getPods(username string) []GetPodsResponse {
 	user, domain, _ := strings.Cut(username, "@")
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
@@ -120,7 +122,6 @@ func helloWorld(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveGetPods(w http.ResponseWriter, r *http.Request) {
-	//TODO get the username from the http.Request
 	data := getPods("foo@bar.baz")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -146,6 +147,11 @@ func getYaml(url string) (string, error) {
 		}
 		defer response.Body.Close()
 
+		// if the GET status isn't "200 OK"
+		if response.StatusCode != 200 {
+			return "", errors.New(fmt.Sprintf("Didn't find a file at the given url: %s", url))
+		}
+
 		body, err := ioutil.ReadAll(response.Body)
 		if err != nil {
 			return "", errors.New(fmt.Sprintf("Could not parse manifest from given url: %s", url))
@@ -157,30 +163,85 @@ func getYaml(url string) (string, error) {
 	}
 }
 
-func parsePost(w http.ResponseWriter, r *http.Request) {
+func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
+	user, domain, _ := strings.Cut(request.UserID, "@")
+	pod.ObjectMeta.Labels = map[string]string{
+		"user": user,
+		"domain": domain,
+	}
+	for i, container := range pod.Spec.Containers {
+		settings, exist := request.Settings[container.Name]
+		// if there are settings for this container (if container.Name is a key in request.Settings)
+		if exist {
+			// then for each setting,
+			for name, value := range settings {
+				// find the env entry with a matching name, and set the value
+				for ii, env := range container.Env {
+					if env.Name == name {
+						pod.Spec.Containers[i].Env[ii].Value = value
+					}
+				}
+			}
+		}
+	}
+}
+
+func getTargetPod(request CreatePodRequest) (apiv1.Pod, error) {
+	var targetPod apiv1.Pod
+
+	// Get the manifest
+	yaml, err := getYaml(request.YamlURL)
+	if err != nil {
+		return targetPod, errors.New(fmt.Sprintf("Couldn't get manifest: %s", err.Error()))
+	}
+
+	// And convert it from []byte -> runtime.Object -> unstructured -> apiv1.Pod
+	deserializer := scheme.Codecs.UniversalDeserializer()
+	object, _, err := deserializer.Decode([]byte(yaml), nil, nil)
+	if err != nil {
+		return targetPod, errors.New(fmt.Sprintf("Couldn't deserialize manifest: %s", err.Error()))
+	}
+	unstructuredPod, err := runtime.DefaultUnstructuredConverter.ToUnstructured(object)
+	if err != nil {
+		return targetPod, errors.New(fmt.Sprintf("Couldn't convert runtime.Object: %s", err.Error()))
+	}
+	// Fill out targetPod with the data from the manifest
+	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPod, &targetPod)
+	if err != nil {
+		return targetPod, errors.New(fmt.Sprintf("Couldn't parse manifest as apiv1.Pod: %s", err.Error()))
+	}
+
+	// Fill in values in targetPod according to the request
+	applyCreatePodRequestSettings(request, &targetPod)
+	// TODO Make a unique name for targetPod
+	return targetPod, nil
+}
+
+func createPod(w http.ResponseWriter, r *http.Request) {
+	// Parse the POSTed request JSON and log the request
 	var request CreatePodRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
+	fmt.Printf("createPod request: %+v\n", request)
 
-	//jsonvalue, _ := json.Marshal(req)
-	fmt.Printf("REQUEST: %+v\n", request)
+	//TODO set HOME_SERVER env var to 10.2.x.x from r.RemoteAddr and SD_UID from user_id
 
-	yaml, err := getYaml(request.YamlURL)
+	targetPod, err := getTargetPod(request)
 	if err != nil {
-		fmt.Printf("ERROR: %s", err.Error())
+		fmt.Println("Error: Invalid targetPod: %s\n", err.Error())
 		return
 	}
-	fmt.Printf("yaml:\n%s\n", yaml)
-	decode := scheme.Codecs.UniversalDeserializer().Decode
-	object, groupVersionKind, err := decode([]byte(yaml), nil, nil)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	fmt.Printf("OBJECT:\n%+v\nGVK:\n%+v\n", object, groupVersionKind)
+
+	//TODO getIngress
+	//TODO copyHostkeys (in a nonblocking goroutine)
+	//TODO mount pod-type-specific static PV
+	//TODO mount user-specific PV
+
+	// create pod (see getExamplePod) and return success/failure message
 }
 
 func main() {
 	http.HandleFunc("/get_pods", serveGetPods)
-	http.HandleFunc("/parse", parsePost)
+	http.HandleFunc("/create_pod", createPod)
 	http.ListenAndServe(":80", nil)
 }
