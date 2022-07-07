@@ -229,6 +229,37 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 	}
 }
 
+func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod) error {
+	userString := strings.Replace(request.UserID, "@", "-", -1)
+	userString = strings.Replace(userString, ".", "-", -1)
+	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, userString)
+	existingPods, err := getPods(request.UserID)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't getPods to find a unique pod name: %s", err.Error()))
+	}
+	podName := basePodName
+	var exists bool
+	for i := 1; i < 11; i++ {
+		exists = false
+		for _, existingPod := range existingPods {
+			if existingPod.PodName == podName {
+				exists = true
+				break
+			}
+		}
+		// if a pod with the name podName doesn't exist yet
+		if !exists {
+			// then set the target pod's name and finish
+			targetPod.ObjectMeta.Name = podName
+			return nil
+		}
+		// otherwise try again with the next name
+		podName = fmt.Sprintf("%s-%d", basePodName, i)
+	}
+	// if all 10 names are in use,
+	return errors.New(fmt.Sprintf("Couldn't find a unique name for %s-(1-9), all are in use", basePodName))
+}
+
 func getTargetPod(request CreatePodRequest) (apiv1.Pod, error) {
 	var targetPod apiv1.Pod
 
@@ -256,7 +287,12 @@ func getTargetPod(request CreatePodRequest) (apiv1.Pod, error) {
 
 	// Fill in values in targetPod according to the request
 	applyCreatePodRequestSettings(request, &targetPod)
-	// TODO Make a unique name for targetPod
+	// Find and set a unique podName in the format pod.metadata.name-user-domain-x
+	err = applyCreatePodName(request, &targetPod)
+	if err != nil {
+		return targetPod, err
+	}
+
 	return targetPod, nil
 }
 
