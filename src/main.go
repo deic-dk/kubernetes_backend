@@ -49,6 +49,10 @@ type CreatePodRequest struct {
 	AllEnvVars       map[string]string
 }
 
+type GetPodsRequest struct {
+	UserID string `json:"user_id"`
+}
+
 func getPodClient() v1.PodInterface {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
 	config, err := rest.InClusterConfig()
@@ -90,15 +94,28 @@ func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 	}
 }
 
-func getPods(username string) []GetPodsResponse {
-	user, domain, _ := strings.Cut(username, "@")
-	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
+func getUserID(user string, domain string) string {
+	if len(domain) > 0 {
+		return fmt.Sprintf("%s@%s", user, domain)
+	}
+	return user
+}
+
+func getPods(username string) ([]GetPodsResponse, error) {
+	var response []GetPodsResponse
+	var opts metav1.ListOptions
+	if len(username) < 1 {
+		opts = metav1.ListOptions{}
+	} else {
+		user, domain, _ := strings.Cut(username, "@")
+		opts = metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
+	}
 	podclient := getPodClient()
 	podlist, err := podclient.List(context.TODO(), opts)
 	if err != nil {
 		panic(err.Error())
+		return response, err
 	}
-	var response []GetPodsResponse
 	for _, n := range podlist.Items {
 		var pod GetPodsResponse
 		var ageSec = time.Now().Sub(n.Status.StartTime.Time).Seconds()
@@ -106,14 +123,14 @@ func getPods(username string) []GetPodsResponse {
 		pod.ContainerName = n.Spec.Containers[0].Name
 		pod.ImageName = n.Spec.Containers[0].Image
 		pod.NodeIP = n.Status.HostIP
-		pod.Owner = fmt.Sprintf("%s@%s", n.ObjectMeta.Labels["user"], n.ObjectMeta.Labels["domain"])
+		pod.Owner = getUserID(n.ObjectMeta.Labels["user"], n.ObjectMeta.Labels["domain"])
 		pod.PodIP = n.Status.PodIP
 		pod.PodName = n.ObjectMeta.Name
 		pod.Status = fmt.Sprintf("%s:%s", n.Status.Phase, n.Status.StartTime.Format("2006-01-02T15:04:05Z"))
 		//TODO: hostkeys, url, sshurl
 		response = append(response, pod)
 	}
-	return response
+	return response, nil
 }
 
 func helloWorld(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +138,16 @@ func helloWorld(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveGetPods(w http.ResponseWriter, r *http.Request) {
-	data := getPods("foo@bar.baz")
+	// parse the request
+	var request GetPodsRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	fmt.Printf("getPods request: %+v\n", request)
+
+	// get the list of pods
+	data, _ := getPods(request.UserID)
+
+	// write the response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(data)
@@ -242,7 +268,7 @@ func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
 	}
 }
 
-func createPod(w http.ResponseWriter, r *http.Request) {
+func serveCreatePod(w http.ResponseWriter, r *http.Request) {
 	// Parse the POSTed request JSON and log the request
 	var request CreatePodRequest
 	decoder := json.NewDecoder(r.Body)
@@ -267,6 +293,6 @@ func createPod(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/get_pods", serveGetPods)
-	http.HandleFunc("/create_pod", createPod)
+	http.HandleFunc("/create_pod", serveCreatePod)
 	http.ListenAndServe(":80", nil)
 }
