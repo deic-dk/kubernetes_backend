@@ -14,8 +14,6 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	//	"k8s.io/apimachinery/pkg/runtime/schema"
-	//	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -47,7 +45,8 @@ type CreatePodRequest struct {
 	YamlURL string `json:"yaml_url"`
 	UserID  string `json:"user_id"`
 	//Settings[container_name][env_var_name] = env_var_value
-	Settings map[string]map[string]string `json:"settings"`
+	ContainerEnvVars map[string]map[string]string `json:"settings"`
+	AllEnvVars       map[string]string
 }
 
 func getPodClient() v1.PodInterface {
@@ -166,21 +165,39 @@ func getYaml(url string) (string, error) {
 func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 	user, domain, _ := strings.Cut(request.UserID, "@")
 	pod.ObjectMeta.Labels = map[string]string{
-		"user": user,
+		"user":   user,
 		"domain": domain,
 	}
 	for i, container := range pod.Spec.Containers {
-		settings, exist := request.Settings[container.Name]
-		// if there are settings for this container (if container.Name is a key in request.Settings)
+		envVars, exist := request.ContainerEnvVars[container.Name]
+		// if there are settings for this container (if container.Name is a key in request.ContainerEnvVars)
 		if exist {
 			// then for each setting,
-			for name, value := range settings {
+			for name, value := range envVars {
 				// find the env entry with a matching name, and set the value
 				for ii, env := range container.Env {
 					if env.Name == name {
 						pod.Spec.Containers[i].Env[ii].Value = value
 					}
 				}
+			}
+		}
+		// for each envvar that should be set in every container,
+		for name, value := range request.AllEnvVars {
+			overwrite := false
+			// try to overwrite the value if the var already exists
+			for ii, env := range pod.Spec.Containers[i].Env {
+				if env.Name == name {
+					pod.Spec.Containers[i].Env[ii].Value = value
+					overwrite = true
+				}
+			}
+			// otherwise, append the var
+			if !overwrite {
+				pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, apiv1.EnvVar{
+					Name:  name,
+					Value: value,
+				})
 			}
 		}
 	}
@@ -217,14 +234,21 @@ func getTargetPod(request CreatePodRequest) (apiv1.Pod, error) {
 	return targetPod, nil
 }
 
+func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
+	remoteIP := regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
+	request.AllEnvVars = map[string]string{
+		"HOME_SERVER": strings.Replace(remoteIP, sciencedataInternalNet, sciencedataPrivateNet, 1),
+		"SD_UID": request.UserID,
+	}
+}
+
 func createPod(w http.ResponseWriter, r *http.Request) {
 	// Parse the POSTed request JSON and log the request
 	var request CreatePodRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
+	setAllEnvVars(&request, r)
 	fmt.Printf("createPod request: %+v\n", request)
-
-	//TODO set HOME_SERVER env var to 10.2.x.x from r.RemoteAddr and SD_UID from user_id
 
 	targetPod, err := getTargetPod(request)
 	if err != nil {
@@ -232,6 +256,7 @@ func createPod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Printf("%v", targetPod)
 	//TODO getIngress
 	//TODO copyHostkeys (in a nonblocking goroutine)
 	//TODO mount pod-type-specific static PV
