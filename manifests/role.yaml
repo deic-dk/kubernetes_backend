@@ -16,13 +16,14 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: modify-pods-services
+  name: modify-sciencedata
   namespace: sciencedata-dev
 rules:
   - apiGroups: [""]
     resources:
       - pods
       - services
+      - persistentvolumeclaims
     verbs:
       - get
       - list
@@ -33,13 +34,42 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: modify-pods-to-sa
+  name: modify-sciencedata-to-sa
   namespace: sciencedata-dev
 subjects:
   - kind: ServiceAccount
     name: user-pods-backend
 roleRef:
   kind: Role
-  name: modify-pods-services 
+  name: modify-sciencedata 
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: provision-nfs
+rules:
+  - apiGroups: [""]
+    resources:
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+      - delete 
+      - create
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: provision-nfs-to-sa
+subjects:
+  - kind: ServiceAccount
+    name: user-pods-backend
+    namespace: sciencedata-dev
+roleRef:
+  kind: ClusterRole
+  name: provision-nfs
   apiGroup: rbac.authorization.k8s.io
 
