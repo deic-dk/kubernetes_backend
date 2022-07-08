@@ -47,6 +47,7 @@ type CreatePodRequest struct {
 	//Settings[container_name][env_var_name] = env_var_value
 	ContainerEnvVars map[string]map[string]string `json:"settings"`
 	AllEnvVars       map[string]string
+	RemoteIP string
 }
 
 type GetPodsRequest struct {
@@ -229,10 +230,14 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 	}
 }
 
-func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod) error {
+func getUserString(request CreatePodRequest) string {
 	userString := strings.Replace(request.UserID, "@", "-", -1)
 	userString = strings.Replace(userString, ".", "-", -1)
-	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, userString)
+	return userString
+}
+
+func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod) error {
+	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, getUserString(request))
 	existingPods, err := getPods(request.UserID)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't getPods to find a unique pod name: %s", err.Error()))
@@ -302,6 +307,57 @@ func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
 		"HOME_SERVER": strings.Replace(remoteIP, sciencedataInternalNet, sciencedataPrivateNet, 1),
 		"SD_UID": request.UserID,
 	}
+	request.RemoteIP = remoteIP
+}
+
+func getPVName(request CreatePodRequest) string {
+	return fmt.Sprintf("nfs-%s-%s", request.RemoteIP, getUserString(request))
+}
+
+func getUserStoragePV(request CreatePodRequest) *apiv1.PersistentVolume {
+	return &apiv1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: getPVName(request),
+		},
+		Spec: apiv1.PersistentVolumeSpec{
+			AccessModes: []apiv1.PersistentVolumeAccessMode{
+				"ReadWriteMany",
+			},
+			PersistentVolumeReclaimPolicy: apiv1.PersistentVolumeReclaimRetain,
+			StorageClassName: "nfs",
+			MountOptions: []string{
+				"hard",
+				"nfsvers=4.1",
+			},
+			PersistentVolumeSource: apiv1.PersistentVolumeSource{
+				NFS: &apiv1.NFSVolumeSource{
+					Server: request.RemoteIP,
+					Path: fmt.Sprintf("/tank/storage/%s", request.UserID),
+				},
+			},
+			ClaimRef: &apiv1.ObjectReference{
+				Namespace: namespace,
+				Name: getPVName(request),
+				Kind: "PersistentVolumeClaim",
+			},
+		},
+	}
+}
+
+func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
+	return &apiv1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name: getPVName(request),
+		},
+		Spec: apiv1.PersistentVolumeClaimSpec{
+			//			StorageClassName: "nfs",
+			AccessModes: []apiv1.PersistentVolumeAccessMode{
+				"ReadWriteMany",
+			},
+			VolumeName: getPVName(request),
+		},
+	}
 }
 
 func serveCreatePod(w http.ResponseWriter, r *http.Request) {
@@ -318,7 +374,12 @@ func serveCreatePod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	targetPV := getUserStoragePV(request)
+	targetPVC := getUserStoragePVC(request)
+
 	fmt.Printf("%v", targetPod)
+	fmt.Printf("%v", targetPV)
+	fmt.Printf("%v", targetPVC)
 	//TODO getIngress
 	//TODO copyHostkeys (in a nonblocking goroutine)
 	//TODO mount pod-type-specific static PV
