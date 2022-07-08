@@ -54,7 +54,14 @@ type GetPodsRequest struct {
 	UserID string `json:"user_id"`
 }
 
-func getPodClient() v1.PodInterface {
+type clientsetHandler struct {
+	clientset *kubernetes.Clientset
+	podClient v1.PodInterface
+	PVClient v1.PersistentVolumeInterface
+	PVCClient v1.PersistentVolumeClaimInterface
+}
+
+func getClientset() *kubernetes.Clientset {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -65,7 +72,7 @@ func getPodClient() v1.PodInterface {
 	if err != nil {
 		panic(err.Error())
 	}
-	return clientset.CoreV1().Pods(namespace)
+	return clientset
 }
 
 func getExamplePod(name string, user string, domain string) *apiv1.Pod {
@@ -102,7 +109,7 @@ func getUserID(user string, domain string) string {
 	return user
 }
 
-func getPods(username string) ([]GetPodsResponse, error) {
+func getPods(client v1.PodInterface, username string) ([]GetPodsResponse, error) {
 	var response []GetPodsResponse
 	var opts metav1.ListOptions
 	if len(username) < 1 {
@@ -111,8 +118,7 @@ func getPods(username string) ([]GetPodsResponse, error) {
 		user, domain, _ := strings.Cut(username, "@")
 		opts = metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
 	}
-	podclient := getPodClient()
-	podlist, err := podclient.List(context.TODO(), opts)
+	podlist, err := client.List(context.TODO(), opts)
 	if err != nil {
 		panic(err.Error())
 		return response, err
@@ -138,7 +144,7 @@ func helloWorld(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("hello"))
 }
 
-func serveGetPods(w http.ResponseWriter, r *http.Request) {
+func (c *clientsetHandler) serveGetPods(w http.ResponseWriter, r *http.Request) {
 	// parse the request
 	var request GetPodsRequest
 	decoder := json.NewDecoder(r.Body)
@@ -146,7 +152,7 @@ func serveGetPods(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("getPods request: %+v\n", request)
 
 	// get the list of pods
-	data, _ := getPods(request.UserID)
+	data, _ := getPods(c.podClient, request.UserID)
 
 	// write the response
 	w.Header().Set("Content-Type", "application/json")
@@ -154,8 +160,7 @@ func serveGetPods(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(data)
 }
 
-func createExamplePod(name string, user string, domain string) (*apiv1.Pod, error) {
-	podclient := getPodClient()
+func createExamplePod(name string, user string, domain string, podclient v1.PodInterface) (*apiv1.Pod, error) {
 	pod := getExamplePod(name, user, domain)
 	result, err := podclient.Create(context.TODO(), pod, metav1.CreateOptions{})
 	return result, err
@@ -236,9 +241,9 @@ func getUserString(request CreatePodRequest) string {
 	return userString
 }
 
-func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod) error {
+func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, client v1.PodInterface) error {
 	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, getUserString(request))
-	existingPods, err := getPods(request.UserID)
+	existingPods, err := getPods(client, request.UserID)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't getPods to find a unique pod name: %s", err.Error()))
 	}
@@ -265,7 +270,7 @@ func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod) error {
 	return errors.New(fmt.Sprintf("Couldn't find a unique name for %s-(1-9), all are in use", basePodName))
 }
 
-func getTargetPod(request CreatePodRequest) (apiv1.Pod, error) {
+func getTargetPod(request CreatePodRequest, client v1.PodInterface) (apiv1.Pod, error) {
 	var targetPod apiv1.Pod
 
 	// Get the manifest
@@ -293,7 +298,7 @@ func getTargetPod(request CreatePodRequest) (apiv1.Pod, error) {
 	// Fill in values in targetPod according to the request
 	applyCreatePodRequestSettings(request, &targetPod)
 	// Find and set a unique podName in the format pod.metadata.name-user-domain-x
-	err = applyCreatePodName(request, &targetPod)
+	err = applyCreatePodName(request, &targetPod, client)
 	if err != nil {
 		return targetPod, err
 	}
@@ -360,7 +365,7 @@ func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
 	}
 }
 
-func serveCreatePod(w http.ResponseWriter, r *http.Request) {
+func (c *clientsetHandler) serveCreatePod(w http.ResponseWriter, r *http.Request) {
 	// Parse the POSTed request JSON and log the request
 	var request CreatePodRequest
 	decoder := json.NewDecoder(r.Body)
@@ -368,7 +373,7 @@ func serveCreatePod(w http.ResponseWriter, r *http.Request) {
 	setAllEnvVars(&request, r)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	targetPod, err := getTargetPod(request)
+	targetPod, err := getTargetPod(request, c.podClient)
 	if err != nil {
 		fmt.Println("Error: Invalid targetPod: %s\n", err.Error())
 		return
@@ -389,7 +394,17 @@ func serveCreatePod(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.HandleFunc("/get_pods", serveGetPods)
-	http.HandleFunc("/create_pod", serveCreatePod)
+	clientset := getClientset()
+	podClient := clientset.CoreV1().Pods(namespace)
+	PVClient := clientset.CoreV1().PersistentVolumes()
+	PVCClient := clientset.CoreV1().PersistentVolumeClaims(namespace)
+	handler := clientsetHandler{
+		clientset: clientset,
+		podClient: podClient,
+		PVClient: PVClient,
+		PVCClient: PVCClient,
+	}
+	http.HandleFunc("/get_pods", handler.serveGetPods)
+	http.HandleFunc("/create_pod", handler.serveCreatePod)
 	http.ListenAndServe(":80", nil)
 }
