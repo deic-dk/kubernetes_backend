@@ -26,6 +26,10 @@ const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-
 const sciencedataPrivateNet = "10.2."
 const sciencedataInternalNet = "10.0."
 
+type GetPodsRequest struct {
+	UserID string `json:"user_id"`
+}
+
 type GetPodsResponse struct {
 	PodName        string
 	ContainerName  string
@@ -47,20 +51,21 @@ type CreatePodRequest struct {
 	//Settings[container_name][env_var_name] = env_var_value
 	ContainerEnvVars map[string]map[string]string `json:"settings"`
 	AllEnvVars       map[string]string
-	RemoteIP string
+	RemoteIP         string
 }
 
-type GetPodsRequest struct {
-	UserID string `json:"user_id"`
+type CreatePodResponse struct {
+	PodName string `json:"pod_name"`
 }
 
 type clientsetHandler struct {
 	clientset *kubernetes.Clientset
 	podClient v1.PodInterface
-	PVClient v1.PersistentVolumeInterface
+	PVClient  v1.PersistentVolumeInterface
 	PVCClient v1.PersistentVolumeClaimInterface
 }
 
+// Generate the structs with methods for interacting with the k8s api.
 func getClientset() *kubernetes.Clientset {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
 	config, err := rest.InClusterConfig()
@@ -75,6 +80,7 @@ func getClientset() *kubernetes.Clientset {
 	return clientset
 }
 
+// Generate an example api object to test pod creation
 func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 	return &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -102,6 +108,7 @@ func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 	}
 }
 
+// "Un-cut" the username string from the user and domain strings
 func getUserID(user string, domain string) string {
 	if len(domain) > 0 {
 		return fmt.Sprintf("%s@%s", user, domain)
@@ -109,6 +116,8 @@ func getUserID(user string, domain string) string {
 	return user
 }
 
+// Fills in a GetPodsResponse with information about all the pods owned by the user.
+// If the username string is empty, use all pods in the namespace.
 func getPods(client v1.PodInterface, username string) ([]GetPodsResponse, error) {
 	var response []GetPodsResponse
 	var opts metav1.ListOptions
@@ -140,10 +149,7 @@ func getPods(client v1.PodInterface, username string) ([]GetPodsResponse, error)
 	return response, nil
 }
 
-func helloWorld(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("hello"))
-}
-
+// Calls getPods using the http request, writes the http response with the getPods data
 func (c *clientsetHandler) serveGetPods(w http.ResponseWriter, r *http.Request) {
 	// parse the request
 	var request GetPodsRequest
@@ -160,12 +166,14 @@ func (c *clientsetHandler) serveGetPods(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(data)
 }
 
+// Example function for testing pod creation
 func createExamplePod(name string, user string, domain string, podclient v1.PodInterface) (*apiv1.Pod, error) {
 	pod := getExamplePod(name, user, domain)
 	result, err := podclient.Create(context.TODO(), pod, metav1.CreateOptions{})
 	return result, err
 }
 
+// Retrieve the yaml manifest from our git repository
 func getYaml(url string) (string, error) {
 	allowed, err := regexp.MatchString(whitelistYamlURLRegex, url)
 	if err != nil {
@@ -194,6 +202,7 @@ func getYaml(url string) (string, error) {
 	}
 }
 
+// Fill in the pod's environment variables from the settings in the CreatePodRequest
 func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 	user, domain, _ := strings.Cut(request.UserID, "@")
 	pod.ObjectMeta.Labels = map[string]string{
@@ -235,12 +244,14 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 	}
 }
 
+// Generate a unique string for each username that can be used in the api objects
 func getUserString(request CreatePodRequest) string {
 	userString := strings.Replace(request.UserID, "@", "-", -1)
 	userString = strings.Replace(userString, ".", "-", -1)
 	return userString
 }
 
+// Attempt to find a unique name for the pod. If successful, set it in the apiv1.Pod
 func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, client v1.PodInterface) error {
 	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, getUserString(request))
 	existingPods, err := getPods(client, request.UserID)
@@ -270,6 +281,61 @@ func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, client v
 	return errors.New(fmt.Sprintf("Couldn't find a unique name for %s-(1-9), all are in use", basePodName))
 }
 
+// Dynamically generate the pod.Spec.Volume entry for an unsatisfied pod.Spec.Container[].VolumeMount
+func getCreatePodSpecVolume(volumeMount apiv1.VolumeMount, request CreatePodRequest) (apiv1.Volume, error) {
+	switch volumeMount.Name {
+	case "local":
+		return apiv1.Volume{
+			Name: "local",
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: fmt.Sprintf("local-claim-%s", strings.ReplaceAll(volumeMount.MountPath, "/", "-")),
+				},
+			},
+		}, nil
+	case "sciencedata":
+		return apiv1.Volume{
+			Name: "sciencedata",
+			VolumeSource: apiv1.VolumeSource{
+				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: getStoragePVName(request),
+				},
+			},
+		}, nil
+	default:
+		return apiv1.Volume{}, errors.New(
+			fmt.Sprintf("Not known how to dynamically create an entry for this volume mount %+v", volumeMount),
+		)
+	}
+}
+
+// Make sure that any VolumeMounts that aren't specified in Spec.Volumes get added.
+// This should be used for e.g. the user's storage, which should be generated at runtime
+// for the given user.
+func applyCreatePodVolumes(targetPod *apiv1.Pod, request CreatePodRequest) error {
+	for _, container := range targetPod.Spec.Containers {
+		for _, volumeMount := range container.VolumeMounts {
+			// For each volume mount, first check whether the volume is specified in pod.Spec.Volumes
+			satisfied := false
+			for _, volume := range targetPod.Spec.Volumes {
+				if volume.Name == volumeMount.Name {
+					satisfied = true
+					break
+				}
+			}
+			if !satisfied {
+				targetVolumeSpec, err := getCreatePodSpecVolume(volumeMount, request)
+				if err != nil {
+					return err
+				}
+				targetPod.Spec.Volumes = append(targetPod.Spec.Volumes, targetVolumeSpec)
+			}
+		}
+	}
+	return nil
+}
+
+// Generate api object for the pod to attempt to create
 func getTargetPod(request CreatePodRequest, client v1.PodInterface) (apiv1.Pod, error) {
 	var targetPod apiv1.Pod
 
@@ -302,34 +368,48 @@ func getTargetPod(request CreatePodRequest, client v1.PodInterface) (apiv1.Pod, 
 	if err != nil {
 		return targetPod, err
 	}
+	err = applyCreatePodVolumes(&targetPod, request)
+	if err != nil {
+		return targetPod, err
+	}
 
 	return targetPod, nil
 }
 
+// Set values in the CreatePodRequest not stated in the http request json
 func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
 	remoteIP := regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
 	request.AllEnvVars = map[string]string{
 		"HOME_SERVER": strings.Replace(remoteIP, sciencedataInternalNet, sciencedataPrivateNet, 1),
-		"SD_UID": request.UserID,
+		"SD_UID":      request.UserID,
 	}
 	request.RemoteIP = remoteIP
 }
 
-func getPVName(request CreatePodRequest) string {
+// Make a unique name for the user's /tank/storage PV and PVC (same name used for both)
+func getStoragePVName(request CreatePodRequest) string {
 	return fmt.Sprintf("nfs-%s-%s", request.RemoteIP, getUserString(request))
 }
 
+// Generate an api object for the PV to attempt to create for the user's /tank/storage
 func getUserStoragePV(request CreatePodRequest) *apiv1.PersistentVolume {
+	name := getStoragePVName(request)
+	user, domain, _ := strings.Cut(request.UserID, "@")
 	return &apiv1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: getPVName(request),
+			Name: name,
+			Labels: map[string]string{
+				"name":   name,
+				"user":   user,
+				"domain": domain,
+			},
 		},
 		Spec: apiv1.PersistentVolumeSpec{
 			AccessModes: []apiv1.PersistentVolumeAccessMode{
 				"ReadWriteMany",
 			},
 			PersistentVolumeReclaimPolicy: apiv1.PersistentVolumeReclaimRetain,
-			StorageClassName: "nfs",
+			StorageClassName:              "nfs",
 			MountOptions: []string{
 				"hard",
 				"nfsvers=4.1",
@@ -337,34 +417,119 @@ func getUserStoragePV(request CreatePodRequest) *apiv1.PersistentVolume {
 			PersistentVolumeSource: apiv1.PersistentVolumeSource{
 				NFS: &apiv1.NFSVolumeSource{
 					Server: request.RemoteIP,
-					Path: fmt.Sprintf("/tank/storage/%s", request.UserID),
+					Path:   fmt.Sprintf("/tank/storage/%s", request.UserID),
 				},
 			},
 			ClaimRef: &apiv1.ObjectReference{
 				Namespace: namespace,
-				Name: getPVName(request),
-				Kind: "PersistentVolumeClaim",
+				Name:      name,
+				Kind:      "PersistentVolumeClaim",
 			},
 		},
 	}
 }
 
+// Generate an api object for the PVC to attempt to create for the user's /tank/storage
 func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
+	name := getStoragePVName(request)
+	user, domain, _ := strings.Cut(request.UserID, "@")
 	return &apiv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
-			Name: getPVName(request),
+			Name:      name,
+			Labels: map[string]string{
+				"name":   name,
+				"user":   user,
+				"domain": domain,
+			},
 		},
 		Spec: apiv1.PersistentVolumeClaimSpec{
 			//			StorageClassName: "nfs",
 			AccessModes: []apiv1.PersistentVolumeAccessMode{
 				"ReadWriteMany",
 			},
-			VolumeName: getPVName(request),
+			VolumeName: name,
 		},
 	}
 }
 
+// Check that the PV and PVC for the user's /tank/storage directory exist
+// Should be called iff the pod has a volume named "sciencedata"
+func ensureUserStorageExists(
+	request CreatePodRequest,
+	PVClient v1.PersistentVolumeInterface,
+	PVCClient v1.PersistentVolumeClaimInterface,
+) error {
+	name := getStoragePVName(request)
+	listOptions := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
+	PVList, err := PVClient.List(context.TODO(), listOptions)
+	if err != nil {
+		return err
+	}
+	if len(PVList.Items) == 0 {
+		targetPV := getUserStoragePV(request)
+		createdPV, err := PVClient.Create(context.TODO(), targetPV, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("CREATED PV: %+v\n", createdPV)
+	}
+	PVCList, err := PVCClient.List(context.TODO(), listOptions)
+	if err != nil {
+		return err
+	}
+	if len(PVCList.Items) == 0 {
+		targetPVC := getUserStoragePVC(request)
+		createdPVC, err := PVCClient.Create(context.TODO(), targetPVC, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("CREATED PVC: %+v\n", createdPVC)
+	}
+	return nil
+}
+
+// Create the pod and other necessary objects, start jobs that should run with pod creation
+// If successful, return the name of the created pod and nil error
+func createPod(
+	request CreatePodRequest,
+	podClient v1.PodInterface,
+	PVClient v1.PersistentVolumeInterface,
+	PVCClient v1.PersistentVolumeClaimInterface,
+) (string, error) {
+	// generate the pod api object to attempt to create
+	targetPod, err := getTargetPod(request, podClient)
+	if err != nil {
+		return "", errors.New(fmt.Sprintf("Error: Invalid targetPod: %s\n", err.Error()))
+	}
+
+	// if the pod requires a PV and PVC for the user, check that those exist, create if not
+	hasUserStorage := false
+	for _, volume := range targetPod.Spec.Volumes {
+		if volume.Name == "sciencedata" {
+			hasUserStorage = true
+		}
+	}
+	if hasUserStorage {
+		err = ensureUserStorageExists(request, PVClient, PVCClient)
+		if err != nil {
+			return "", errors.New(fmt.Sprintf("Error: Couldn't ensure user storage exists: %s", err.Error()))
+		}
+	}
+
+	// create the pod
+	createdPod, err := podClient.Create(context.TODO(), &targetPod, metav1.CreateOptions{})
+	if err != nil {
+		return "", errors.New(fmt.Sprintf("Error: Failed to create pod: %s", err.Error()))
+	}
+	fmt.Printf("CREATED POD: %+v", createdPod)
+	//TODO getIngress
+	//TODO copyHostkeys (in a nonblocking goroutine)
+
+	return createdPod.ObjectMeta.Name, nil
+}
+
+// Calls createPod with the http request, writes the success/failure http response
 func (c *clientsetHandler) serveCreatePod(w http.ResponseWriter, r *http.Request) {
 	// Parse the POSTed request JSON and log the request
 	var request CreatePodRequest
@@ -373,24 +538,22 @@ func (c *clientsetHandler) serveCreatePod(w http.ResponseWriter, r *http.Request
 	setAllEnvVars(&request, r)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	targetPod, err := getTargetPod(request, c.podClient)
+	podName, err := createPod(request, c.podClient, c.PVClient, c.PVCClient)
+
+	var status int
+	var data CreatePodResponse
 	if err != nil {
-		fmt.Println("Error: Invalid targetPod: %s\n", err.Error())
-		return
+		status = http.StatusBadRequest
+		data.PodName = ""
+	} else {
+		status = http.StatusOK
+		data.PodName = podName
 	}
 
-	targetPV := getUserStoragePV(request)
-	targetPVC := getUserStoragePVC(request)
-
-	fmt.Printf("%v", targetPod)
-	fmt.Printf("%v", targetPV)
-	fmt.Printf("%v", targetPVC)
-	//TODO getIngress
-	//TODO copyHostkeys (in a nonblocking goroutine)
-	//TODO mount pod-type-specific static PV
-	//TODO mount user-specific PV
-
-	// create pod (see getExamplePod) and return success/failure message
+	// write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
 }
 
 func main() {
@@ -401,9 +564,11 @@ func main() {
 	handler := clientsetHandler{
 		clientset: clientset,
 		podClient: podClient,
-		PVClient: PVClient,
+		PVClient:  PVClient,
 		PVCClient: PVCClient,
 	}
+	// By writing serveGetPods etc as methods on a clientsetHandler, the podClient etc can
+	// be created in main() and accessed inside the http.HandleFuncs without passing another argument
 	http.HandleFunc("/get_pods", handler.serveGetPods)
 	http.HandleFunc("/create_pod", handler.serveCreatePod)
 	http.ListenAndServe(":80", nil)
