@@ -80,33 +80,7 @@ func getClientset() *kubernetes.Clientset {
 	return clientset
 }
 
-// Generate an example api object to test pod creation
-func getExamplePod(name string, user string, domain string) *apiv1.Pod {
-	return &apiv1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"user":   user,
-				"domain": domain,
-			},
-		},
-		Spec: apiv1.PodSpec{
-			Containers: []apiv1.Container{
-				{
-					Name:  "jupyter",
-					Image: "kube.sciencedata.dk:5000/jupyter_sciencedata_testing",
-					Ports: []apiv1.ContainerPort{
-						{
-							ContainerPort: 8888,
-							Protocol:      apiv1.ProtocolTCP,
-						},
-					},
-				},
-			},
-		},
-	}
-}
+// GET PODS FUNCTIONS
 
 // "Un-cut" the username string from the user and domain strings
 func getUserID(user string, domain string) string {
@@ -166,11 +140,63 @@ func (c *clientsetHandler) serveGetPods(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(data)
 }
 
+// CREATE POD FUNCTIONS
+
+// Generate an example api object to test pod creation
+func getExamplePod(name string, user string, domain string) *apiv1.Pod {
+	return &apiv1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"user":   user,
+				"domain": domain,
+			},
+		},
+		Spec: apiv1.PodSpec{
+			Containers: []apiv1.Container{
+				{
+					Name:  "jupyter",
+					Image: "kube.sciencedata.dk:5000/jupyter_sciencedata_testing",
+					Ports: []apiv1.ContainerPort{
+						{
+							ContainerPort: 8888,
+							Protocol:      apiv1.ProtocolTCP,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 // Example function for testing pod creation
 func createExamplePod(name string, user string, domain string, podclient v1.PodInterface) (*apiv1.Pod, error) {
 	pod := getExamplePod(name, user, domain)
 	result, err := podclient.Create(context.TODO(), pod, metav1.CreateOptions{})
 	return result, err
+}
+
+// Set values in the CreatePodRequest not stated in the http request json
+func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
+	remoteIP := regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
+	request.AllEnvVars = map[string]string{
+		"HOME_SERVER": strings.Replace(remoteIP, sciencedataInternalNet, sciencedataPrivateNet, 1),
+		"SD_UID":      request.UserID,
+	}
+	request.RemoteIP = remoteIP
+}
+
+// Make a unique name for the user's /tank/storage PV and PVC (same name used for both)
+func getStoragePVName(request CreatePodRequest) string {
+	return fmt.Sprintf("nfs-%s-%s", request.RemoteIP, getUserString(request))
+}
+
+// Generate a unique string for each username that can be used in the api objects
+func getUserString(request CreatePodRequest) string {
+	userString := strings.Replace(request.UserID, "@", "-", -1)
+	userString = strings.Replace(userString, ".", "-", -1)
+	return userString
 }
 
 // Retrieve the yaml manifest from our git repository
@@ -242,13 +268,6 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 			}
 		}
 	}
-}
-
-// Generate a unique string for each username that can be used in the api objects
-func getUserString(request CreatePodRequest) string {
-	userString := strings.Replace(request.UserID, "@", "-", -1)
-	userString = strings.Replace(userString, ".", "-", -1)
-	return userString
 }
 
 // Attempt to find a unique name for the pod. If successful, set it in the apiv1.Pod
@@ -374,21 +393,6 @@ func getTargetPod(request CreatePodRequest, client v1.PodInterface) (apiv1.Pod, 
 	}
 
 	return targetPod, nil
-}
-
-// Set values in the CreatePodRequest not stated in the http request json
-func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
-	remoteIP := regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
-	request.AllEnvVars = map[string]string{
-		"HOME_SERVER": strings.Replace(remoteIP, sciencedataInternalNet, sciencedataPrivateNet, 1),
-		"SD_UID":      request.UserID,
-	}
-	request.RemoteIP = remoteIP
-}
-
-// Make a unique name for the user's /tank/storage PV and PVC (same name used for both)
-func getStoragePVName(request CreatePodRequest) string {
-	return fmt.Sprintf("nfs-%s-%s", request.RemoteIP, getUserString(request))
 }
 
 // Generate an api object for the PV to attempt to create for the user's /tank/storage
