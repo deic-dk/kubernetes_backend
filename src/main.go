@@ -289,7 +289,10 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 // Attempt to find a unique name for the pod. If successful, set it in the apiv1.Pod
 func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, client v1.PodInterface) error {
 	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, getUserString(request.UserID))
-	existingPods, err := getPods(request.UserID, client)
+	user, domain, _ := strings.Cut(request.UserID, "@")
+	existingPods, err := client.List(context.TODO(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain),
+		})
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't getPods to find a unique pod name: %s", err.Error()))
 	}
@@ -297,8 +300,8 @@ func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, client v
 	var exists bool
 	for i := 1; i < 11; i++ {
 		exists = false
-		for _, existingPod := range existingPods {
-			if existingPod.PodName == podName {
+		for _, existingPod := range existingPods.Items {
+			if existingPod.ObjectMeta.Name == podName {
 				exists = true
 				break
 			}

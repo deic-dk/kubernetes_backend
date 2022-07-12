@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 func TestCreatePod(t *testing.T) {
@@ -29,6 +30,7 @@ func TestCreatePod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't delete user pods: %s", err.Error())
 	}
+	time.Sleep(1 * time.Second)
 
 	// Make the CreatePodRequest
 	request := CreatePodRequest{
@@ -53,14 +55,17 @@ func TestCreatePod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't create pod: %s", err.Error())
 	}
+	time.Sleep(1 * time.Second)
 	name1, err := createPod(request, podClient, PVClient, PVCClient)
 	if err != nil {
 		t.Fatalf("Couldn't create pod: %s", err.Error())
 	}
+	time.Sleep(1 * time.Second)
 	name2, err := createPod(request, podClient, PVClient, PVCClient)
 	if err != nil {
 		t.Fatalf("Couldn't create pod: %s", err.Error())
 	}
+	time.Sleep(1 * time.Second)
 
 	t.Logf("Success. Created: %s, %s, %s", name0, name1, name2)
 
@@ -73,6 +78,7 @@ func TestCreatePod(t *testing.T) {
 	if len(testuserPodList.Items) != 3 {
 		t.Fatalf("Incorrect number of pods exists after creation")
 	}
+	time.Sleep(1 * time.Second)
 
 	storageListOptions := v1.ListOptions{
 		LabelSelector: fmt.Sprintf("name=%s", getStoragePVName(userIP, userID)),
@@ -96,6 +102,7 @@ func TestCreatePod(t *testing.T) {
 
 	// Clean up
 	err = deleteAllPodsUser(deleteRequest, podClient, PVClient, PVCClient)
+	time.Sleep(2 * time.Second)
 	if err != nil {
 		t.Fatalf("Couldn't delete user pods: %s", err.Error())
 	}
@@ -115,5 +122,4 @@ func TestCreatePod(t *testing.T) {
 	}
 
 	t.Log("Success, cleaned up created resources")
-
 }
