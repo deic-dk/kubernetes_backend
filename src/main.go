@@ -12,6 +12,7 @@ import (
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -444,6 +445,9 @@ func getUserStoragePV(request CreatePodRequest) *apiv1.PersistentVolume {
 				Name:      name,
 				Kind:      "PersistentVolumeClaim",
 			},
+			Capacity: apiv1.ResourceList{
+				apiv1.ResourceStorage: resource.MustParse("10Gi"),
+			},
 		},
 	}
 }
@@ -468,6 +472,11 @@ func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
 				"ReadWriteMany",
 			},
 			VolumeName: name,
+			Resources: apiv1.ResourceRequirements{
+				Requests: apiv1.ResourceList{
+					apiv1.ResourceStorage: resource.MustParse("10Gi"),
+				},
+			},
 		},
 	}
 }
@@ -608,6 +617,38 @@ func cleanUserStorage(
 	return nil
 }
 
+// Delete all the pods owned by request.UserID
+// Convenience function for testing
+func deleteAllPodsUser(
+	request DeletePodRequest,
+	podClient v1.PodInterface,
+	PVClient v1.PersistentVolumeInterface,
+	PVCClient v1.PersistentVolumeClaimInterface,
+) error {
+	if request.UserID == "" {
+		return errors.New("Need username of owner of pods to be deleted")
+	}
+	user, domain, _ := strings.Cut(request.UserID, "@")
+	podlist, err := podClient.List(
+		context.TODO(),
+		metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)},
+	)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list user's pods: %s", err.Error()))
+	}
+	for _, pod := range podlist.Items {
+		err = podClient.Delete(context.TODO(), pod.ObjectMeta.Name, metav1.DeleteOptions{})
+		if err != nil {
+			return errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
+		}
+	}
+	err = cleanUserStorage(request, PVClient, PVCClient)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Error while removing user storage: %s", err.Error()))
+	}
+	return nil
+}
+
 // Delete a pod and remove user storage if no longer in use
 func deletePod(
 	request DeletePodRequest,
@@ -616,6 +657,7 @@ func deletePod(
 	PVCClient v1.PersistentVolumeClaimInterface,
 ) error {
 	// check whether the pod exists, searching by user if username given
+	var listOpts metav1.ListOptions
 	if len(request.UserID) < 1 {
 		listOpts = metav1.ListOptions{}
 	} else {
@@ -663,7 +705,7 @@ func (c *clientsetHandler) serveDeletePod(w http.ResponseWriter, r *http.Request
 	request.RemoteIP = regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	err := deletePod(request, c.podClient)
+	err := deletePod(request, c.podClient, c.PVClient, c.PVCClient)
 	var status int
 	var response DeletePodResponse
 	if err != nil {
