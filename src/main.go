@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	watch "k8s.io/apimachinery/pkg/watch"
 )
 
 // TODO figure out how to get the namespace automatically from within the pod where this runs
@@ -26,6 +27,7 @@ const namespace = "sciencedata-dev"
 const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-dk\\/pod_manifests"
 const sciencedataPrivateNet = "10.2."
 const sciencedataInternalNet = "10.0."
+const podReadyTimeout = 10 * time.Second
 
 type GetPodsRequest struct {
 	UserID string `json:"user_id"`
@@ -157,6 +159,26 @@ func (c *clientsetHandler) serveGetPods(w http.ResponseWriter, r *http.Request) 
 }
 
 // CREATE POD FUNCTIONS
+
+// Generate a request for testing getPod
+func getTestCreatePodRequest(userID string, userIP string) CreatePodRequest {
+	request := CreatePodRequest{
+		UserID: userID,
+		ContainerEnvVars: map[string]map[string]string{
+			"jupyter": {
+				"FILE": "foo",
+				"WORKING_DIRECTORY": "foobar",
+			},
+		},
+		AllEnvVars: map[string]string{
+			"HOME_SERVER": userIP,
+			"SD_UID": userID,
+		},
+		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+		RemoteIP: userIP,
+	}
+	return request
+}
 
 // Generate an example api object to test pod creation
 func getExamplePod(name string, user string, domain string) *apiv1.Pod {
@@ -503,7 +525,7 @@ func ensureUserStorageExists(
 		if err != nil {
 			return err
 		}
-		fmt.Printf("CREATED PV: %+v\n", createdPV)
+		fmt.Printf("CREATED PV: %s\n", createdPV.ObjectMeta.Name)
 	}
 	PVCList, err := PVCClient.List(context.TODO(), listOptions)
 	if err != nil {
@@ -515,9 +537,61 @@ func ensureUserStorageExists(
 		if err != nil {
 			return err
 		}
-		fmt.Printf("CREATED PVC: %+v\n", createdPVC)
+		fmt.Printf("CREATED PVC: %s\n", createdPVC.ObjectMeta.Name)
 	}
 	return nil
+}
+
+// Write true into ch when watcher receives an event for a ready pod
+func waitPodReadySignal(watcher watch.Interface, ch chan bool) {
+	// Run this loop every time an event is ready in the watcher channel
+	for event := range watcher.ResultChan() {
+		// event.Object is a new runtim.Object with the pod in its state after the event
+		eventPod := event.Object.(*apiv1.Pod)
+		// Loop through the pod conditions to find the one that's "Ready"
+		for _, condition := range eventPod.Status.Conditions {
+			if condition.Type == apiv1.PodReady {
+				// If the pod is ready, then stop watching, so the event loop will terminate
+				if condition.Status == apiv1.ConditionTrue {
+					watcher.Stop()
+					ch <- true
+				}
+				break
+			}
+		}
+	}
+}
+
+// Block until returning either true (pod is ready) or false (timeout reached)
+func waitPodReady(pod *apiv1.Pod, client v1.PodInterface) bool {
+	// Create a watcher object
+	listOptions := metav1.SingleObject(pod.ObjectMeta)
+	watcher, err := client.Watch(context.TODO(), listOptions)
+	if err != nil {
+		fmt.Printf("Error preparing start jobs for %s, couldn't watch for status: %s\n",
+			pod.ObjectMeta.Name,
+			err.Error(),
+		)
+		return false
+	}
+
+	// Make a channel for waitPodReadySignal to use when the pod is ready
+	readyChannel := make(chan bool)
+	go waitPodReadySignal(watcher, readyChannel)
+	// Write `false` into the channel after the timeout
+	time.AfterFunc(podReadyTimeout, func() { readyChannel <- false })
+	// return the first input into the channel
+	return <- readyChannel
+}
+
+// Perform tasks that should be done for each created pod
+func createPodStartJobs(pod *apiv1.Pod, client v1.PodInterface) {
+	ready := waitPodReady(pod, client)
+	if !ready {
+		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.ObjectMeta.Name)
+		return
+	}
+	// Perform start jobs here
 }
 
 // Create the pod and other necessary objects, start jobs that should run with pod creation
@@ -553,9 +627,10 @@ func createPod(
 	if err != nil {
 		return "", errors.New(fmt.Sprintf("Error: Failed to create pod: %s", err.Error()))
 	}
-	fmt.Printf("CREATED POD: %+v", createdPod)
+	fmt.Printf("CREATED POD: %s\n", createdPod.ObjectMeta.Name)
 	//TODO getIngress
 	//TODO copyHostkeys (in a nonblocking goroutine)
+	go createPodStartJobs(createdPod, podClient)
 
 	return createdPod.ObjectMeta.Name, nil
 }
