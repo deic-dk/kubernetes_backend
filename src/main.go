@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 // TODO figure out how to get the namespace automatically from within the pod where this runs
@@ -71,6 +73,11 @@ type DeletePodResponse struct {
 }
 
 type clientsetHandler struct {
+	clientset *kubernetes.Clientset
+}
+
+type startJobber struct {
+	pod       *apiv1.Pod
 	clientset *kubernetes.Clientset
 }
 
@@ -557,13 +564,13 @@ func waitPodReadySignal(watcher watch.Interface, ch chan bool) {
 }
 
 // Block until returning either true (pod is ready) or false (timeout reached)
-func waitPodReady(pod *apiv1.Pod, clientset *kubernetes.Clientset) bool {
+func (sj *startJobber) waitPodReady() bool {
 	// Create a watcher object
-	listOptions := metav1.SingleObject(pod.ObjectMeta)
-	watcher, err := clientset.CoreV1().Pods(namespace).Watch(context.TODO(), listOptions)
+	listOptions := metav1.SingleObject(sj.pod.ObjectMeta)
+	watcher, err := sj.clientset.CoreV1().Pods(namespace).Watch(context.TODO(), listOptions)
 	if err != nil {
 		fmt.Printf("Error preparing start jobs for %s, couldn't watch for status: %s\n",
-			pod.ObjectMeta.Name,
+			sj.pod.ObjectMeta.Name,
 			err.Error(),
 		)
 		return false
@@ -578,14 +585,92 @@ func waitPodReady(pod *apiv1.Pod, clientset *kubernetes.Clientset) bool {
 	return <-readyChannel
 }
 
+func (sj *startJobber) podExec(command []string) (bytes.Buffer, bytes.Buffer, error) {
+	var stdout, stderr bytes.Buffer
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return stdout, stderr, errors.New(fmt.Sprintf("Couldn't get rest config: %s", err.Error()))
+	}
+	restRequest := sj.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(sj.pod.ObjectMeta.Name).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(
+			&apiv1.PodExecOptions{
+				Container: sj.pod.Spec.Containers[0].Name,
+				Command:   command,
+				Stdin:     false,
+				Stdout:    true,
+				Stderr:    true,
+				TTY:       false,
+			},
+			scheme.ParameterCodec,
+		)
+	exec, err := remotecommand.NewSPDYExecutor(config, "POST", restRequest.URL())
+	if err != nil {
+		return stdout, stderr, errors.New(fmt.Sprintf("Couldn't create executor: %s", err.Error()))
+	}
+
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdin:  nil,
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Tty:    false,
+	})
+	if err != nil {
+		return stdout, stderr, errors.New(fmt.Sprintf("Stream error: %s", err.Error()))
+	}
+	return stdout, stderr, nil
+}
+
+func (sj *startJobber) copyToken(key string) error {
+	filename := fmt.Sprintf("/tmp/%s-%s", sj.pod.Name, key)
+	var stdout, stderr bytes.Buffer
+	var err error
+	for i := 0; i < 5; i++ {
+		stdout, stderr, err = sj.podExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)})
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		} else {
+			err = ioutil.WriteFile(filename, stdout.Bytes(), 0600)
+			if err != nil {
+				return errors.New(fmt.Sprintf("Couldn't write file %s: %s", filename, err.Error()))
+			}
+			return nil
+		}
+	}
+	return errors.New(fmt.Sprintf("Timeout while trying to copy %s: %s", filename, stderr.String()))
+}
+
+func (sj *startJobber) copyAllTokens() {
+	var toCopy []string
+	for key, value := range sj.pod.ObjectMeta.Annotations {
+		if value == "copyForFrontend" {
+			toCopy = append(toCopy, key)
+		}
+	}
+	for _, key := range toCopy {
+		err := sj.copyToken(key)
+		if err != nil {
+			fmt.Printf("Error while copying key: %s", err.Error())
+		}
+	}
+}
+
 // Perform tasks that should be done for each created pod
 func createPodStartJobs(pod *apiv1.Pod, clientset *kubernetes.Clientset) {
-	ready := waitPodReady(pod, clientset)
+	startJob := startJobber{pod: pod, clientset: clientset}
+	ready := startJob.waitPodReady()
 	if !ready {
 		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.ObjectMeta.Name)
 		return
 	}
+	fmt.Printf("POD READY: %s\n", pod.ObjectMeta.Name)
+
 	// Perform start jobs here
+	startJob.copyAllTokens()
 }
 
 // Create the pod and other necessary objects, start jobs that should run with pod creation
@@ -597,7 +682,7 @@ func createPod(
 	// generate the pod api object to attempt to create
 	targetPod, err := getTargetPod(request, clientset)
 	if err != nil {
-		return "", errors.New(fmt.Sprintf("Error: Invalid targetPod: %s\n", err.Error()))
+		return "", errors.New(fmt.Sprintf("Invalid targetPod: %s\n", err.Error()))
 	}
 
 	// if the pod requires a PV and PVC for the user, check that those exist, create if not
@@ -610,14 +695,14 @@ func createPod(
 	if hasUserStorage {
 		err = ensureUserStorageExists(request, clientset)
 		if err != nil {
-			return "", errors.New(fmt.Sprintf("Error: Couldn't ensure user storage exists: %s", err.Error()))
+			return "", errors.New(fmt.Sprintf("Couldn't ensure user storage exists: %s", err.Error()))
 		}
 	}
 
 	// create the pod
 	createdPod, err := clientset.CoreV1().Pods(namespace).Create(context.TODO(), &targetPod, metav1.CreateOptions{})
 	if err != nil {
-		return "", errors.New(fmt.Sprintf("Error: Failed to create pod: %s", err.Error()))
+		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
 	}
 	fmt.Printf("CREATED POD: %s\n", createdPod.ObjectMeta.Name)
 	//TODO getIngress
@@ -643,6 +728,7 @@ func (c *clientsetHandler) serveCreatePod(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		status = http.StatusBadRequest
 		response.PodName = ""
+		fmt.Printf("Error: %s", err.Error())
 	} else {
 		status = http.StatusOK
 		response.PodName = podName

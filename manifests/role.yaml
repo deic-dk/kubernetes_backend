@@ -30,6 +30,11 @@ rules:
       - delete 
       - create
       - watch
+  - apiGroups: [""]
+    resources:
+      - pods/exec
+    verbs:
+      - create
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
