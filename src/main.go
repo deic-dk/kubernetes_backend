@@ -15,11 +15,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
-	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
-	watch "k8s.io/apimachinery/pkg/watch"
 )
 
 // TODO figure out how to get the namespace automatically from within the pod where this runs
@@ -73,9 +72,6 @@ type DeletePodResponse struct {
 
 type clientsetHandler struct {
 	clientset *kubernetes.Clientset
-	podClient v1.PodInterface
-	PVClient  v1.PersistentVolumeInterface
-	PVCClient v1.PersistentVolumeClaimInterface
 }
 
 // Generate the structs with methods for interacting with the k8s api.
@@ -105,7 +101,7 @@ func getUserID(user string, domain string) string {
 
 // Fills in a GetPodsResponse with information about all the pods owned by the user.
 // If the username string is empty, use all pods in the namespace.
-func getPods(username string, client v1.PodInterface) ([]GetPodsResponse, error) {
+func getPods(username string, clientset *kubernetes.Clientset) ([]GetPodsResponse, error) {
 	var response []GetPodsResponse
 	var opts metav1.ListOptions
 	if len(username) < 1 {
@@ -114,7 +110,7 @@ func getPods(username string, client v1.PodInterface) ([]GetPodsResponse, error)
 		user, domain, _ := strings.Cut(username, "@")
 		opts = metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
 	}
-	podlist, err := client.List(context.TODO(), opts)
+	podlist, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), opts)
 	if err != nil {
 		return response, err
 	}
@@ -144,7 +140,7 @@ func (c *clientsetHandler) serveGetPods(w http.ResponseWriter, r *http.Request) 
 	fmt.Printf("getPods request: %+v\n", request)
 
 	// get the list of pods
-	response, err := getPods(request.UserID, c.podClient)
+	response, err := getPods(request.UserID, c.clientset)
 	var status int
 	if err != nil {
 		status = http.StatusBadRequest
@@ -166,15 +162,15 @@ func getTestCreatePodRequest(userID string, userIP string) CreatePodRequest {
 		UserID: userID,
 		ContainerEnvVars: map[string]map[string]string{
 			"jupyter": {
-				"FILE": "foo",
+				"FILE":              "foo",
 				"WORKING_DIRECTORY": "foobar",
 			},
 		},
 		AllEnvVars: map[string]string{
 			"HOME_SERVER": userIP,
-			"SD_UID": userID,
+			"SD_UID":      userID,
 		},
-		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
 		RemoteIP: userIP,
 	}
 	return request
@@ -209,10 +205,9 @@ func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 }
 
 // Example function for testing pod creation
-func createExamplePod(name string, user string, domain string, podclient v1.PodInterface) (*apiv1.Pod, error) {
+func createExamplePod(name string, user string, domain string, clientset *kubernetes.Clientset) (*apiv1.Pod, error) {
 	pod := getExamplePod(name, user, domain)
-	result, err := podclient.Create(context.TODO(), pod, metav1.CreateOptions{})
-	return result, err
+	return clientset.CoreV1().Pods(namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 }
 
 // Set values in the CreatePodRequest not stated in the http request json
@@ -309,12 +304,12 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 }
 
 // Attempt to find a unique name for the pod. If successful, set it in the apiv1.Pod
-func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, client v1.PodInterface) error {
+func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, clientset *kubernetes.Clientset) error {
 	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, getUserString(request.UserID))
 	user, domain, _ := strings.Cut(request.UserID, "@")
-	existingPods, err := client.List(context.TODO(), metav1.ListOptions{
+	existingPods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain),
-		})
+	})
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't getPods to find a unique pod name: %s", err.Error()))
 	}
@@ -396,7 +391,7 @@ func applyCreatePodVolumes(targetPod *apiv1.Pod, request CreatePodRequest) error
 }
 
 // Generate api object for the pod to attempt to create
-func getTargetPod(request CreatePodRequest, client v1.PodInterface) (apiv1.Pod, error) {
+func getTargetPod(request CreatePodRequest, clientset *kubernetes.Clientset) (apiv1.Pod, error) {
 	var targetPod apiv1.Pod
 
 	// Get the manifest
@@ -424,7 +419,7 @@ func getTargetPod(request CreatePodRequest, client v1.PodInterface) (apiv1.Pod, 
 	// Fill in values in targetPod according to the request
 	applyCreatePodRequestSettings(request, &targetPod)
 	// Find and set a unique podName in the format pod.metadata.name-user-domain-x
-	err = applyCreatePodName(request, &targetPod, client)
+	err = applyCreatePodName(request, &targetPod, clientset)
 	if err != nil {
 		return targetPod, err
 	}
@@ -510,30 +505,29 @@ func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
 // Should be called iff the pod has a volume named "sciencedata"
 func ensureUserStorageExists(
 	request CreatePodRequest,
-	PVClient v1.PersistentVolumeInterface,
-	PVCClient v1.PersistentVolumeClaimInterface,
+	clientset *kubernetes.Clientset,
 ) error {
 	name := getStoragePVName(request.RemoteIP, request.UserID)
 	listOptions := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
-	PVList, err := PVClient.List(context.TODO(), listOptions)
+	PVList, err := clientset.CoreV1().PersistentVolumes().List(context.TODO(), listOptions)
 	if err != nil {
 		return err
 	}
 	if len(PVList.Items) == 0 {
 		targetPV := getUserStoragePV(request)
-		createdPV, err := PVClient.Create(context.TODO(), targetPV, metav1.CreateOptions{})
+		createdPV, err := clientset.CoreV1().PersistentVolumes().Create(context.TODO(), targetPV, metav1.CreateOptions{})
 		if err != nil {
 			return err
 		}
 		fmt.Printf("CREATED PV: %s\n", createdPV.ObjectMeta.Name)
 	}
-	PVCList, err := PVCClient.List(context.TODO(), listOptions)
+	PVCList, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(context.TODO(), listOptions)
 	if err != nil {
 		return err
 	}
 	if len(PVCList.Items) == 0 {
 		targetPVC := getUserStoragePVC(request)
-		createdPVC, err := PVCClient.Create(context.TODO(), targetPVC, metav1.CreateOptions{})
+		createdPVC, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Create(context.TODO(), targetPVC, metav1.CreateOptions{})
 		if err != nil {
 			return err
 		}
@@ -563,10 +557,10 @@ func waitPodReadySignal(watcher watch.Interface, ch chan bool) {
 }
 
 // Block until returning either true (pod is ready) or false (timeout reached)
-func waitPodReady(pod *apiv1.Pod, client v1.PodInterface) bool {
+func waitPodReady(pod *apiv1.Pod, clientset *kubernetes.Clientset) bool {
 	// Create a watcher object
 	listOptions := metav1.SingleObject(pod.ObjectMeta)
-	watcher, err := client.Watch(context.TODO(), listOptions)
+	watcher, err := clientset.CoreV1().Pods(namespace).Watch(context.TODO(), listOptions)
 	if err != nil {
 		fmt.Printf("Error preparing start jobs for %s, couldn't watch for status: %s\n",
 			pod.ObjectMeta.Name,
@@ -581,12 +575,12 @@ func waitPodReady(pod *apiv1.Pod, client v1.PodInterface) bool {
 	// Write `false` into the channel after the timeout
 	time.AfterFunc(podReadyTimeout, func() { readyChannel <- false })
 	// return the first input into the channel
-	return <- readyChannel
+	return <-readyChannel
 }
 
 // Perform tasks that should be done for each created pod
-func createPodStartJobs(pod *apiv1.Pod, client v1.PodInterface) {
-	ready := waitPodReady(pod, client)
+func createPodStartJobs(pod *apiv1.Pod, clientset *kubernetes.Clientset) {
+	ready := waitPodReady(pod, clientset)
 	if !ready {
 		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.ObjectMeta.Name)
 		return
@@ -598,12 +592,10 @@ func createPodStartJobs(pod *apiv1.Pod, client v1.PodInterface) {
 // If successful, return the name of the created pod and nil error
 func createPod(
 	request CreatePodRequest,
-	podClient v1.PodInterface,
-	PVClient v1.PersistentVolumeInterface,
-	PVCClient v1.PersistentVolumeClaimInterface,
+	clientset *kubernetes.Clientset,
 ) (string, error) {
 	// generate the pod api object to attempt to create
-	targetPod, err := getTargetPod(request, podClient)
+	targetPod, err := getTargetPod(request, clientset)
 	if err != nil {
 		return "", errors.New(fmt.Sprintf("Error: Invalid targetPod: %s\n", err.Error()))
 	}
@@ -616,21 +608,21 @@ func createPod(
 		}
 	}
 	if hasUserStorage {
-		err = ensureUserStorageExists(request, PVClient, PVCClient)
+		err = ensureUserStorageExists(request, clientset)
 		if err != nil {
 			return "", errors.New(fmt.Sprintf("Error: Couldn't ensure user storage exists: %s", err.Error()))
 		}
 	}
 
 	// create the pod
-	createdPod, err := podClient.Create(context.TODO(), &targetPod, metav1.CreateOptions{})
+	createdPod, err := clientset.CoreV1().Pods(namespace).Create(context.TODO(), &targetPod, metav1.CreateOptions{})
 	if err != nil {
 		return "", errors.New(fmt.Sprintf("Error: Failed to create pod: %s", err.Error()))
 	}
 	fmt.Printf("CREATED POD: %s\n", createdPod.ObjectMeta.Name)
 	//TODO getIngress
 	//TODO copyHostkeys (in a nonblocking goroutine)
-	go createPodStartJobs(createdPod, podClient)
+	go createPodStartJobs(createdPod, clientset)
 
 	return createdPod.ObjectMeta.Name, nil
 }
@@ -644,7 +636,7 @@ func (c *clientsetHandler) serveCreatePod(w http.ResponseWriter, r *http.Request
 	setAllEnvVars(&request, r)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	podName, err := createPod(request, c.podClient, c.PVClient, c.PVCClient)
+	podName, err := createPod(request, c.clientset)
 
 	var status int
 	var response CreatePodResponse
@@ -667,27 +659,26 @@ func (c *clientsetHandler) serveCreatePod(w http.ResponseWriter, r *http.Request
 // Delete lingering PV and PVCs for user storage if they exist
 func cleanUserStorage(
 	request DeletePodRequest,
-	PVClient v1.PersistentVolumeInterface,
-	PVCClient v1.PersistentVolumeClaimInterface,
+	clientset *kubernetes.Clientset,
 ) error {
 	name := getStoragePVName(request.RemoteIP, request.UserID)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
-	pvcList, err := PVCClient.List(context.TODO(), opts)
+	pvcList, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(context.TODO(), opts)
 	if err != nil {
 		return err
 	}
 	if len(pvcList.Items) > 0 {
-		err = PVCClient.Delete(context.TODO(), name, metav1.DeleteOptions{})
+		err = clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error: Failed to delete PVC: %s", err.Error()))
 		}
 	}
-	pvList, err := PVClient.List(context.TODO(), opts)
+	pvList, err := clientset.CoreV1().PersistentVolumes().List(context.TODO(), opts)
 	if err != nil {
 		return err
 	}
 	if len(pvList.Items) > 0 {
-		err = PVClient.Delete(context.TODO(), name, metav1.DeleteOptions{})
+		err = clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), name, metav1.DeleteOptions{})
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error: Failed to delete PV: %s", err.Error()))
 		}
@@ -699,15 +690,13 @@ func cleanUserStorage(
 // Convenience function for testing
 func deleteAllPodsUser(
 	request DeletePodRequest,
-	podClient v1.PodInterface,
-	PVClient v1.PersistentVolumeInterface,
-	PVCClient v1.PersistentVolumeClaimInterface,
+	clientset *kubernetes.Clientset,
 ) error {
 	if request.UserID == "" {
 		return errors.New("Need username of owner of pods to be deleted")
 	}
 	user, domain, _ := strings.Cut(request.UserID, "@")
-	podlist, err := podClient.List(
+	podlist, err := clientset.CoreV1().Pods(namespace).List(
 		context.TODO(),
 		metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)},
 	)
@@ -715,12 +704,12 @@ func deleteAllPodsUser(
 		return errors.New(fmt.Sprintf("Couldn't list user's pods: %s", err.Error()))
 	}
 	for _, pod := range podlist.Items {
-		err = podClient.Delete(context.TODO(), pod.ObjectMeta.Name, metav1.DeleteOptions{})
+		err = clientset.CoreV1().Pods(namespace).Delete(context.TODO(), pod.ObjectMeta.Name, metav1.DeleteOptions{})
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
 		}
 	}
-	err = cleanUserStorage(request, PVClient, PVCClient)
+	err = cleanUserStorage(request, clientset)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error while removing user storage: %s", err.Error()))
 	}
@@ -730,9 +719,7 @@ func deleteAllPodsUser(
 // Delete a pod and remove user storage if no longer in use
 func deletePod(
 	request DeletePodRequest,
-	podClient v1.PodInterface,
-	PVClient v1.PersistentVolumeInterface,
-	PVCClient v1.PersistentVolumeClaimInterface,
+	clientset *kubernetes.Clientset,
 ) error {
 	// check whether the pod exists, searching by user if username given
 	var listOpts metav1.ListOptions
@@ -742,7 +729,7 @@ func deletePod(
 		user, domain, _ := strings.Cut(request.UserID, "@")
 		listOpts = metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
 	}
-	podlist, err := podClient.List(context.TODO(), listOpts)
+	podlist, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), listOpts)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error: Couldn't list pods to check for deletion: %s", err.Error()))
 	}
@@ -753,7 +740,7 @@ func deletePod(
 			break
 		}
 	}
-	// The index isn't used in the podClient.Delete request, but this serves as a necessary check
+	// The index isn't used in the Pods.Delete request, but this serves as a necessary check
 	// that the user and domain tags of the pod match the request.UserID
 	if indexDelete == -1 {
 		return errors.New("Pod doesn't exist, cannot be deleted")
@@ -761,14 +748,14 @@ func deletePod(
 
 	// delete it
 	deleteOpts := metav1.DeleteOptions{} // could include GracePeriodSeconds option here
-	err = podClient.Delete(context.TODO(), request.PodName, deleteOpts)
+	err = clientset.CoreV1().Pods(namespace).Delete(context.TODO(), request.PodName, deleteOpts)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error: Failed to delete: %s", err.Error()))
 	}
 
 	// If there are no pods remaining owned by this user,
 	if len(podlist.Items) < 2 {
-		err = cleanUserStorage(request, PVClient, PVCClient)
+		err = cleanUserStorage(request, clientset)
 	}
 
 	return nil
@@ -783,7 +770,7 @@ func (c *clientsetHandler) serveDeletePod(w http.ResponseWriter, r *http.Request
 	request.RemoteIP = regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	err := deletePod(request, c.podClient, c.PVClient, c.PVCClient)
+	err := deletePod(request, c.clientset)
 	var status int
 	var response DeletePodResponse
 	if err != nil {
@@ -801,17 +788,10 @@ func (c *clientsetHandler) serveDeletePod(w http.ResponseWriter, r *http.Request
 }
 
 func main() {
-	clientset := getClientset()
-	podClient := clientset.CoreV1().Pods(namespace)
-	PVClient := clientset.CoreV1().PersistentVolumes()
-	PVCClient := clientset.CoreV1().PersistentVolumeClaims(namespace)
 	handler := clientsetHandler{
-		clientset: clientset,
-		podClient: podClient,
-		PVClient:  PVClient,
-		PVCClient: PVCClient,
+		clientset: getClientset(),
 	}
-	// By writing serveGetPods etc as methods on a clientsetHandler, the podClient etc can
+	// By writing serveGetPods etc as methods on a clientsetHandler, the clientset can
 	// be created in main() and accessed inside the http.HandleFuncs without passing another argument
 	http.HandleFunc("/get_pods", handler.serveGetPods)
 	http.HandleFunc("/create_pod", handler.serveCreatePod)
