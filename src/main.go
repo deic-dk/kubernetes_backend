@@ -35,18 +35,17 @@ type GetPodsRequest struct {
 }
 
 type GetPodsResponse struct {
-	PodName        string
-	ContainerName  string
-	ImageName      string
-	PodIP          string
-	NodeIP         string
-	Owner          string
-	Age            string
-	Status         string
-	Ed25519Hostkey string
-	RsaHostkey     string
-	Url            string
-	SshUrl         string
+	PodName       string            `json:"pod_name"`
+	ContainerName string            `json:"container_name"`
+	ImageName     string            `json:"image_name"`
+	PodIP         string            `json:"pod_ip"`
+	NodeIP        string            `json:"node_ip"`
+	Owner         string            `json:"owner"`
+	Age           string            `json:"age"`
+	Status        string            `json:"status"`
+	Url           string            `json:"url"`
+	SshUrl        string            `json:"ssh_url"`
+	Tokens        map[string]string `json:"tokens"`
 }
 
 type CreatePodRequest struct {
@@ -106,6 +105,39 @@ func getUserID(user string, domain string) string {
 	return user
 }
 
+func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
+	var podInfo GetPodsResponse
+	var ageSec = time.Now().Sub(existingPod.Status.StartTime.Time).Seconds()
+	podInfo.Age = fmt.Sprintf("%d:%d:%d", int32(ageSec/3600), int32(ageSec/60)%60, int32(ageSec)%60)
+	podInfo.ContainerName = existingPod.Spec.Containers[0].Name
+	podInfo.ImageName = existingPod.Spec.Containers[0].Image
+	podInfo.NodeIP = existingPod.Status.HostIP
+	podInfo.Owner = getUserID(existingPod.ObjectMeta.Labels["user"], existingPod.ObjectMeta.Labels["domain"])
+	podInfo.PodIP = existingPod.Status.PodIP
+	podInfo.PodName = existingPod.Name
+	podInfo.Status = fmt.Sprintf("%s:%s", existingPod.Status.Phase, existingPod.Status.StartTime.Format("2006-01-02T15:04:05Z"))
+
+	// Initialize the tokens map so it can be written into in the following block
+	podInfo.Tokens = make(map[string]string)
+	for key, value := range existingPod.ObjectMeta.Annotations {
+		// If this key is specified in the manifest to be copied from /tmp/key and shown to the user in the frontend
+		if value == "copyForFrontend" {
+			filename := fmt.Sprintf("/tmp/%s-%s", existingPod.Name, key)
+			content, err := ioutil.ReadFile(filename)
+			if err != nil {
+				// If the file is missing, just let the key be absent for the user, but log that it occurred
+				fmt.Printf("Error copying tokens from file %s: %s\n", filename, err.Error())
+				continue
+			}
+			podInfo.Tokens[key] = string(content)
+		}
+	}
+
+	// TODO get url from ingress
+	// TODO get ssh_url from service if exists
+	return podInfo
+}
+
 // Fills in a GetPodsResponse with information about all the pods owned by the user.
 // If the username string is empty, use all pods in the namespace.
 func getPods(username string, clientset *kubernetes.Clientset) ([]GetPodsResponse, error) {
@@ -121,19 +153,9 @@ func getPods(username string, clientset *kubernetes.Clientset) ([]GetPodsRespons
 	if err != nil {
 		return response, err
 	}
-	for _, n := range podlist.Items {
-		var pod GetPodsResponse
-		var ageSec = time.Now().Sub(n.Status.StartTime.Time).Seconds()
-		pod.Age = fmt.Sprintf("%d:%d:%d", int32(ageSec/3600), int32(ageSec/60)%60, int32(ageSec)%60)
-		pod.ContainerName = n.Spec.Containers[0].Name
-		pod.ImageName = n.Spec.Containers[0].Image
-		pod.NodeIP = n.Status.HostIP
-		pod.Owner = getUserID(n.ObjectMeta.Labels["user"], n.ObjectMeta.Labels["domain"])
-		pod.PodIP = n.Status.PodIP
-		pod.PodName = n.ObjectMeta.Name
-		pod.Status = fmt.Sprintf("%s:%s", n.Status.Phase, n.Status.StartTime.Format("2006-01-02T15:04:05Z"))
-		//TODO: hostkeys, url, sshurl
-		response = append(response, pod)
+	for _, existingPod := range podlist.Items {
+		podInfo := fillPodResponse(existingPod)
+		response = append(response, podInfo)
 	}
 	return response, nil
 }
@@ -312,7 +334,7 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 
 // Attempt to find a unique name for the pod. If successful, set it in the apiv1.Pod
 func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, clientset *kubernetes.Clientset) error {
-	basePodName := fmt.Sprintf("%s-%s", targetPod.ObjectMeta.Name, getUserString(request.UserID))
+	basePodName := fmt.Sprintf("%s-%s", targetPod.Name, getUserString(request.UserID))
 	user, domain, _ := strings.Cut(request.UserID, "@")
 	existingPods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain),
@@ -325,7 +347,7 @@ func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, clientse
 	for i := 1; i < 11; i++ {
 		exists = false
 		for _, existingPod := range existingPods.Items {
-			if existingPod.ObjectMeta.Name == podName {
+			if existingPod.Name == podName {
 				exists = true
 				break
 			}
@@ -333,7 +355,7 @@ func applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod, clientse
 		// if a pod with the name podName doesn't exist yet
 		if !exists {
 			// then set the target pod's name and finish
-			targetPod.ObjectMeta.Name = podName
+			targetPod.Name = podName
 			return nil
 		}
 		// otherwise try again with the next name
@@ -526,7 +548,7 @@ func ensureUserStorageExists(
 		if err != nil {
 			return err
 		}
-		fmt.Printf("CREATED PV: %s\n", createdPV.ObjectMeta.Name)
+		fmt.Printf("CREATED PV: %s\n", createdPV.Name)
 	}
 	PVCList, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(context.TODO(), listOptions)
 	if err != nil {
@@ -538,7 +560,7 @@ func ensureUserStorageExists(
 		if err != nil {
 			return err
 		}
-		fmt.Printf("CREATED PVC: %s\n", createdPVC.ObjectMeta.Name)
+		fmt.Printf("CREATED PVC: %s\n", createdPVC.Name)
 	}
 	return nil
 }
@@ -570,7 +592,7 @@ func (sj *startJobber) waitPodReady() bool {
 	watcher, err := sj.clientset.CoreV1().Pods(namespace).Watch(context.TODO(), listOptions)
 	if err != nil {
 		fmt.Printf("Error preparing start jobs for %s, couldn't watch for status: %s\n",
-			sj.pod.ObjectMeta.Name,
+			sj.pod.Name,
 			err.Error(),
 		)
 		return false
@@ -593,7 +615,7 @@ func (sj *startJobber) podExec(command []string) (bytes.Buffer, bytes.Buffer, er
 	}
 	restRequest := sj.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
-		Name(sj.pod.ObjectMeta.Name).
+		Name(sj.pod.Name).
 		Namespace(namespace).
 		SubResource("exec").
 		VersionedParams(
@@ -624,6 +646,7 @@ func (sj *startJobber) podExec(command []string) (bytes.Buffer, bytes.Buffer, er
 	return stdout, stderr, nil
 }
 
+// Try up to 5 times to copy /tmp/"key" in the created pod into /tmp
 func (sj *startJobber) copyToken(key string) error {
 	filename := fmt.Sprintf("/tmp/%s-%s", sj.pod.Name, key)
 	var stdout, stderr bytes.Buffer
@@ -634,6 +657,7 @@ func (sj *startJobber) copyToken(key string) error {
 			time.Sleep(2 * time.Second)
 			continue
 		} else {
+			// Limit output size to... 4kB?
 			err = ioutil.WriteFile(filename, stdout.Bytes(), 0600)
 			if err != nil {
 				return errors.New(fmt.Sprintf("Couldn't write file %s: %s", filename, err.Error()))
@@ -664,10 +688,10 @@ func createPodStartJobs(pod *apiv1.Pod, clientset *kubernetes.Clientset) {
 	startJob := startJobber{pod: pod, clientset: clientset}
 	ready := startJob.waitPodReady()
 	if !ready {
-		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.ObjectMeta.Name)
+		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.Name)
 		return
 	}
-	fmt.Printf("POD READY: %s\n", pod.ObjectMeta.Name)
+	fmt.Printf("POD READY: %s\n", pod.Name)
 
 	// Perform start jobs here
 	startJob.copyAllTokens()
@@ -704,12 +728,12 @@ func createPod(
 	if err != nil {
 		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
 	}
-	fmt.Printf("CREATED POD: %s\n", createdPod.ObjectMeta.Name)
+	fmt.Printf("CREATED POD: %s\n", createdPod.Name)
 	//TODO getIngress
 	//TODO copyHostkeys (in a nonblocking goroutine)
 	go createPodStartJobs(createdPod, clientset)
 
-	return createdPod.ObjectMeta.Name, nil
+	return createdPod.Name, nil
 }
 
 // Calls createPod with the http request, writes the success/failure http response
@@ -790,7 +814,7 @@ func deleteAllPodsUser(
 		return errors.New(fmt.Sprintf("Couldn't list user's pods: %s", err.Error()))
 	}
 	for _, pod := range podlist.Items {
-		err = clientset.CoreV1().Pods(namespace).Delete(context.TODO(), pod.ObjectMeta.Name, metav1.DeleteOptions{})
+		err = clientset.CoreV1().Pods(namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
 		}
@@ -821,7 +845,7 @@ func deletePod(
 	}
 	indexDelete := -1
 	for i, pod := range podlist.Items {
-		if pod.ObjectMeta.Name == request.PodName {
+		if pod.Name == request.PodName {
 			indexDelete = i
 			break
 		}
@@ -882,5 +906,8 @@ func main() {
 	http.HandleFunc("/get_pods", handler.serveGetPods)
 	http.HandleFunc("/create_pod", handler.serveCreatePod)
 	http.HandleFunc("/delete_pod", handler.serveDeletePod)
-	http.ListenAndServe(":80", nil)
+	err := http.ListenAndServe(":80", nil)
+	if err != nil {
+		fmt.Printf("Error running server: %s\n", err.Error())
+	}
 }
