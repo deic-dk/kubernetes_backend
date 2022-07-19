@@ -29,6 +29,7 @@ const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-
 const sciencedataPrivateNet = "10.2."
 const sciencedataInternalNet = "10.0."
 const podReadyTimeout = 10 * time.Second
+const podDeleteTimeout = 30 * time.Second
 
 type GetPodsRequest struct {
 	UserID string `json:"user_id"`
@@ -608,17 +609,20 @@ func (c *clientsetWrapper) ensureUserStorageExists(request CreatePodRequest) err
 func signalPodReady(watcher watch.Interface, ch chan bool) {
 	// Run this loop every time an event is ready in the watcher channel
 	for event := range watcher.ResultChan() {
-		// event.Object is a new runtim.Object with the pod in its state after the event
-		eventPod := event.Object.(*apiv1.Pod)
-		// Loop through the pod conditions to find the one that's "Ready"
-		for _, condition := range eventPod.Status.Conditions {
-			if condition.Type == apiv1.PodReady {
-				// If the pod is ready, then stop watching, so the event loop will terminate
-				if condition.Status == apiv1.ConditionTrue {
-					watcher.Stop()
-					ch <- true
+		// the event.Object is only sure to be an apiv1.Pod if the event.Type is Modified
+		if event.Type == watch.Modified {
+			// event.Object is a new runtime.Object with the pod in its state after the event
+			eventPod := event.Object.(*apiv1.Pod)
+			// Loop through the pod conditions to find the one that's "Ready"
+			for _, condition := range eventPod.Status.Conditions {
+				if condition.Type == apiv1.PodReady {
+					// If the pod is ready, then stop watching, so the event loop will terminate
+					if condition.Status == apiv1.ConditionTrue {
+						watcher.Stop()
+						ch <- true
+					}
+					break
 				}
-				break
 			}
 		}
 	}
@@ -626,18 +630,18 @@ func signalPodReady(watcher watch.Interface, ch chan bool) {
 
 // Block until returning either true (signalFunc pushes true) or false (timeout reached)
 // signalFunc should take a watcher for a pod and push true when the desired state is reached
-func (c *clientsetWrapper) waitPod(pod *apiv1.Pod, signalFunc func(watch.Interface, chan bool)) bool {
-	listOptions := metav1.SingleObject(pod.ObjectMeta)
+func (c *clientsetWrapper) waitPod(podName string, timeout time.Duration, signalFunc func(watch.Interface, chan bool)) bool {
+	listOptions := metav1.ListOptions{FieldSelector: fmt.Sprintf("metadata.name=%s", podName)}
 	watcher, err := c.ClientWatchPod(listOptions)
 	if err != nil {
-		fmt.Printf("Couldn't create watcher for pod %s: %s\n", pod.Name, err.Error())
+		fmt.Printf("Couldn't create watcher for pod %s: %s\n", podName, err.Error())
 		return false
 	}
 	// Make a channel for the signalFunc to use when the pod is ready
 	doneChannel := make(chan bool)
 	go signalFunc(watcher, doneChannel)
 	// Write `false` into the channel after the timeout
-	time.AfterFunc(podReadyTimeout, func() { doneChannel <- false })
+	time.AfterFunc(timeout, func() { doneChannel <- false })
 	// return the first input into the channel
 	return <-doneChannel
 }
@@ -721,7 +725,7 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 
 // Perform tasks that should be done for each created pod
 func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod) {
-	ready := c.waitPod(pod, signalPodReady)
+	ready := c.waitPod(pod.Name, podReadyTimeout, signalPodReady)
 	if !ready {
 		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.Name)
 		return
@@ -851,8 +855,33 @@ func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest) error {
 	return nil
 }
 
-// Delete a pod and remove user storage if no longer in use
-func (c *clientsetWrapper) deletePod(request DeletePodRequest) error {
+func signalPodDeleted(watcher watch.Interface, ch chan bool) {
+	for event := range watcher.ResultChan() {
+		if event.Type == watch.Deleted {
+			watcher.Stop()
+			ch <- true
+		}
+	}
+}
+
+func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, finished chan bool) {
+	deleted := c.waitPod(request.PodName, podDeleteTimeout, signalPodDeleted)
+	if !deleted {
+		fmt.Printf("Pod %s didn't finish deleting before timeout. Cleanup jobs not attempted.\n", request.PodName)
+		finished <- false
+		return
+	}
+
+	// if the user has no other pods, then:
+	// err := c.cleanUserStorage(request)
+
+	finished <- true
+}
+
+// Delete a pod and remove user storage if no longer in use,
+// return nil when the delete request was made successfully,
+// push finished<-true when clean up tasks complete successfully
+func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan bool) error {
 	// check whether the pod exists, searching by user if username given
 	var listOpts metav1.ListOptions
 	if len(request.UserID) < 1 {
@@ -878,15 +907,12 @@ func (c *clientsetWrapper) deletePod(request DeletePodRequest) error {
 		return errors.New("Pod doesn't exist, cannot be deleted")
 	}
 
+	// Start watching the pod to perform cleanup once it's deleted
+	go c.deletePodCleanJobs(request, finished)
 	// delete it
 	err = c.ClientDeletePod(request.PodName)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error: Failed to delete: %s", err.Error()))
-	}
-
-	// If there are no pods remaining owned by this user,
-	if len(podlist.Items) < 2 {
-		err = c.cleanUserStorage(request)
+		return errors.New(fmt.Sprintf("Error: Failed to request pod deletion: %s", err.Error()))
 	}
 
 	return nil
@@ -899,9 +925,10 @@ func (c *clientsetWrapper) serveDeletePod(w http.ResponseWriter, r *http.Request
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
 	request.RemoteIP = regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
-	fmt.Printf("createPod request: %+v\n", request)
+	fmt.Printf("deletePod request: %+v\n", request)
 
-	err := c.deletePod(request)
+	finished := make(chan bool)
+	err := c.deletePod(request, finished)
 	var status int
 	var response DeletePodResponse
 	if err != nil {
