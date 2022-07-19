@@ -566,7 +566,7 @@ func ensureUserStorageExists(
 }
 
 // Write true into ch when watcher receives an event for a ready pod
-func waitPodReadySignal(watcher watch.Interface, ch chan bool) {
+func signalPodReady(watcher watch.Interface, ch chan bool) {
 	// Run this loop every time an event is ready in the watcher channel
 	for event := range watcher.ResultChan() {
 		// event.Object is a new runtim.Object with the pod in its state after the event
@@ -607,20 +607,36 @@ func (sj *startJobber) waitPodReady() bool {
 	return <-readyChannel
 }
 
-func (sj *startJobber) podExec(command []string) (bytes.Buffer, bytes.Buffer, error) {
+func waitPod(pod *apiv1.Pod, clientset *kubernetes.Clientset, signalFunc func(watch.Interface, chan bool)) bool {
+	listOptions := metav1.SingleObject(pod.ObjectMeta)
+	watcher, err := clientset.CoreV1().Pods(namespace).Watch(context.TODO(), listOptions)
+	if err != nil {
+		fmt.Printf("Couldn't create watcher for pod %s: %s\n", pod.Name, err.Error())
+		return false
+	}
+	// Make a channel for the signalFunc to use when the pod is ready
+	doneChannel := make(chan bool)
+	go signalFunc(watcher, doneChannel)
+	// Write `false` into the channel after the timeout
+	time.AfterFunc(podReadyTimeout, func() { doneChannel <- false })
+	// return the first input into the channel
+	return <-doneChannel
+}
+
+func podExec(command []string, pod *apiv1.Pod, clientset *kubernetes.Clientset) (bytes.Buffer, bytes.Buffer, error) {
 	var stdout, stderr bytes.Buffer
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return stdout, stderr, errors.New(fmt.Sprintf("Couldn't get rest config: %s", err.Error()))
 	}
-	restRequest := sj.clientset.CoreV1().RESTClient().Post().
+	restRequest := clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
-		Name(sj.pod.Name).
+		Name(pod.Name).
 		Namespace(namespace).
 		SubResource("exec").
 		VersionedParams(
 			&apiv1.PodExecOptions{
-				Container: sj.pod.Spec.Containers[0].Name,
+				Container: pod.Spec.Containers[0].Name,
 				Command:   command,
 				Stdin:     false,
 				Stdout:    true,
@@ -647,12 +663,12 @@ func (sj *startJobber) podExec(command []string) (bytes.Buffer, bytes.Buffer, er
 }
 
 // Try up to 5 times to copy /tmp/"key" in the created pod into /tmp
-func (sj *startJobber) copyToken(key string) error {
-	filename := fmt.Sprintf("/tmp/%s-%s", sj.pod.Name, key)
+func copyToken(key string, pod *apiv1.Pod, clientset *kubernetes.Clientset) error {
+	filename := fmt.Sprintf("/tmp/%s-%s", pod.Name, key)
 	var stdout, stderr bytes.Buffer
 	var err error
 	for i := 0; i < 5; i++ {
-		stdout, stderr, err = sj.podExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)})
+		stdout, stderr, err = podExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, pod, clientset)
 		if err != nil {
 			time.Sleep(2 * time.Second)
 			continue
@@ -668,15 +684,15 @@ func (sj *startJobber) copyToken(key string) error {
 	return errors.New(fmt.Sprintf("Timeout while trying to copy %s: %s", filename, stderr.String()))
 }
 
-func (sj *startJobber) copyAllTokens() {
+func copyAllTokens(pod *apiv1.Pod, clientset *kubernetes.Clientset) {
 	var toCopy []string
-	for key, value := range sj.pod.ObjectMeta.Annotations {
+	for key, value := range pod.ObjectMeta.Annotations {
 		if value == "copyForFrontend" {
 			toCopy = append(toCopy, key)
 		}
 	}
 	for _, key := range toCopy {
-		err := sj.copyToken(key)
+		err := copyToken(key, pod, clientset)
 		if err != nil {
 			fmt.Printf("Error while copying key: %s", err.Error())
 		}
@@ -685,8 +701,7 @@ func (sj *startJobber) copyAllTokens() {
 
 // Perform tasks that should be done for each created pod
 func createPodStartJobs(pod *apiv1.Pod, clientset *kubernetes.Clientset) {
-	startJob := startJobber{pod: pod, clientset: clientset}
-	ready := startJob.waitPodReady()
+	ready := waitPod(pod, clientset, signalPodReady)
 	if !ready {
 		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.Name)
 		return
@@ -694,7 +709,7 @@ func createPodStartJobs(pod *apiv1.Pod, clientset *kubernetes.Clientset) {
 	fmt.Printf("POD READY: %s\n", pod.Name)
 
 	// Perform start jobs here
-	startJob.copyAllTokens()
+	copyAllTokens(pod, clientset)
 }
 
 // Create the pod and other necessary objects, start jobs that should run with pod creation
@@ -845,7 +860,7 @@ func deletePod(
 	}
 	indexDelete := -1
 	for i, pod := range podlist.Items {
-		if pod.Name == request.PodName {
+		if pod.ObjectMeta.Name == request.PodName {
 			indexDelete = i
 			break
 		}
