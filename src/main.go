@@ -876,112 +876,6 @@ func getPVUserID(pv apiv1.PersistentVolume) string {
 	return uid
 }
 
-// Get the user ID to whom a PVC belongs if it is a valid user storage,
-// otherwise return an empty string
-func getPVCUserID(pvc apiv1.PersistentVolumeClaim) string {
-	user := pvc.ObjectMeta.Labels["user"]
-	domain := pvc.ObjectMeta.Labels["domain"]
-	uid := getUserID(user, domain)
-	if pvc.Name != getStoragePVName(uid) {
-		return ""
-	}
-	return uid
-}
-
-func (c *clientsetWrapper) cleanAllUnused() error {
-	podList, err := c.getUserPodList("")
-	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't list all pods: %s\n", err.Error()))
-	}
-
-	// Get a list of all pods and pod owners
-	var podNameList []string
-	userIDsWithPods := make(map[string]bool)
-	for _, pod := range podList.Items {
-		podNameList = append(podNameList, pod.Name)
-		userID := getUserID(
-			pod.ObjectMeta.Labels["user"],
-			pod.ObjectMeta.Labels["domain"],
-		)
-		if userID != "" {
-			// use a map so that if a user has multiple pods, they will appear once in the list of keys
-			userIDsWithPods[userID] = true
-		}
-	}
-
-	// Clean Persistent Volume Claims
-	PVCList, err := c.ClientListPVC(metav1.ListOptions{})
-	for _, pvc := range PVCList.Items {
-		owner := getPVCUserID(pvc)
-		// If this PV is a user storage, it will have an owner with a nonempty name
-		if owner != "" {
-			// check whether the owner has any pods running
-			inUse := false
-			for userID := range userIDsWithPods {
-				if userID == owner {
-					inUse = true
-					break
-				}
-			}
-			// if the owner doesn't have any pods, the PV should be deleted
-			if !inUse {
-				err := c.ClientDeletePVC(pvc.Name)
-				if err != nil {
-					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pvc.Name, err.Error()))
-				}
-			}
-		}
-	}
-
-	// Clean Persistent Volumes
-	PVList, err := c.ClientListPV(metav1.ListOptions{})
-	for _, pv := range PVList.Items {
-		owner := getPVUserID(pv)
-		// If this PV is a user storage, it will have an owner with a nonempty name
-		if owner != "" {
-			// check whether the owner has any pods running
-			inUse := false
-			for userID := range userIDsWithPods {
-				if userID == owner {
-					inUse = true
-					break
-				}
-			}
-			// if the owner doesn't have any pods, the PV should be deleted
-			if !inUse {
-				err := c.ClientDeletePV(pv.Name)
-				if err != nil {
-					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pv.Name, err.Error()))
-				}
-			}
-		}
-	}
-
-	// Clean Temporary Files
-	files, err := ioutil.ReadDir("/tmp/tokens/")
-	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't list token directory: %s\n", err.Error()))
-	}
-	for _, file := range files {
-		filename := file.Name()
-		inUse := false
-		for _, podName := range podNameList {
-			if podName == filename {
-				inUse = true
-				break
-			}
-		}
-		if !inUse {
-			err = os.RemoveAll(fmt.Sprintf("/tmp/tokens/%s", filename))
-			if err != nil {
-				return errors.New(fmt.Sprintf("Couldn't delete unused files: %s\n", err.Error()))
-			}
-		}
-	}
-
-	return nil
-}
-
 func signalPodDeleted(watcher watch.Interface, ch chan bool) {
 	for event := range watcher.ResultChan() {
 		if event.Type == watch.Deleted {
@@ -1098,6 +992,126 @@ func (c *clientsetWrapper) serveDeletePod(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
 }
+// Get the user ID to whom a PVC belongs if it is a valid user storage,
+// otherwise return an empty string
+func getPVCUserID(pvc apiv1.PersistentVolumeClaim) string {
+	user := pvc.ObjectMeta.Labels["user"]
+	domain := pvc.ObjectMeta.Labels["domain"]
+	uid := getUserID(user, domain)
+	if pvc.Name != getStoragePVName(uid) {
+		return ""
+	}
+	return uid
+}
+
+// Remove all the unused user storage and tempfiles
+func (c *clientsetWrapper) cleanAllUnused() error {
+	podList, err := c.getUserPodList("")
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list all pods: %s\n", err.Error()))
+	}
+
+	// Get a list of all pods and pod owners
+	var podNameList []string
+	userIDsWithPods := make(map[string]bool)
+	for _, pod := range podList.Items {
+		podNameList = append(podNameList, pod.Name)
+		userID := getUserID(
+			pod.ObjectMeta.Labels["user"],
+			pod.ObjectMeta.Labels["domain"],
+		)
+		if userID != "" {
+			// use a map so that if a user has multiple pods, they will appear once in the list of keys
+			userIDsWithPods[userID] = true
+		}
+	}
+
+	// Clean Persistent Volume Claims
+	PVCList, err := c.ClientListPVC(metav1.ListOptions{})
+	for _, pvc := range PVCList.Items {
+		owner := getPVCUserID(pvc)
+		// If this PV is a user storage, it will have an owner with a nonempty name
+		if owner != "" {
+			// check whether the owner has any pods running
+			inUse := false
+			for userID := range userIDsWithPods {
+				if userID == owner {
+					inUse = true
+					break
+				}
+			}
+			// if the owner doesn't have any pods, the PV should be deleted
+			if !inUse {
+				err := c.ClientDeletePVC(pvc.Name)
+				if err != nil {
+					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pvc.Name, err.Error()))
+				}
+			}
+		}
+	}
+
+	// Clean Persistent Volumes
+	PVList, err := c.ClientListPV(metav1.ListOptions{})
+	for _, pv := range PVList.Items {
+		owner := getPVUserID(pv)
+		// If this PV is a user storage, it will have an owner with a nonempty name
+		if owner != "" {
+			// check whether the owner has any pods running
+			inUse := false
+			for userID := range userIDsWithPods {
+				if userID == owner {
+					inUse = true
+					break
+				}
+			}
+			// if the owner doesn't have any pods, the PV should be deleted
+			if !inUse {
+				err := c.ClientDeletePV(pv.Name)
+				if err != nil {
+					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pv.Name, err.Error()))
+				}
+			}
+		}
+	}
+
+	// Clean Temporary Files
+	files, err := ioutil.ReadDir("/tmp/tokens/")
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list token directory: %s\n", err.Error()))
+	}
+	for _, file := range files {
+		filename := file.Name()
+		inUse := false
+		for _, podName := range podNameList {
+			if podName == filename {
+				inUse = true
+				break
+			}
+		}
+		if !inUse {
+			err = os.RemoveAll(fmt.Sprintf("/tmp/tokens/%s", filename))
+			if err != nil {
+				return errors.New(fmt.Sprintf("Couldn't delete unused files: %s\n", err.Error()))
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *clientsetWrapper) serveCleanAllUnused(w http.ResponseWriter, r *http.Request) {
+	err := c.cleanAllUnused()
+	status := http.StatusOK
+	reply := "Success\n"
+	if err != nil {
+		fmt.Printf("Error while cleaning unused: %s\n", err.Error())
+		status = http.StatusBadRequest
+		reply = "Error\n"
+	}
+	// write the response
+	w.WriteHeader(status)
+	fmt.Fprint(w, reply)
+}
 
 func main() {
 	csWrapper := clientsetWrapper{
@@ -1108,6 +1122,7 @@ func main() {
 	http.HandleFunc("/get_pods", csWrapper.serveGetPods)
 	http.HandleFunc("/create_pod", csWrapper.serveCreatePod)
 	http.HandleFunc("/delete_pod", csWrapper.serveDeletePod)
+	http.HandleFunc("/clean_unused", csWrapper.serveCleanAllUnused)
 	err := http.ListenAndServe(":80", nil)
 	if err != nil {
 		fmt.Printf("Error running server: %s\n", err.Error())
