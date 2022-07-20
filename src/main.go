@@ -293,8 +293,8 @@ func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
 }
 
 // Make a unique name for the user's /tank/storage PV and PVC (same name used for both)
-func getStoragePVName(remoteIP string, userID string) string {
-	return fmt.Sprintf("nfs-%s-%s", remoteIP, getUserString(userID))
+func getStoragePVName(userID string) string {
+	return fmt.Sprintf("user-storage-%s", getUserString(userID))
 }
 
 // Generate a unique string for each username that can be used in the api objects
@@ -425,7 +425,7 @@ func getCreatePodSpecVolume(volumeMount apiv1.VolumeMount, request CreatePodRequ
 			Name: "sciencedata",
 			VolumeSource: apiv1.VolumeSource{
 				PersistentVolumeClaim: &apiv1.PersistentVolumeClaimVolumeSource{
-					ClaimName: getStoragePVName(request.RemoteIP, request.UserID),
+					ClaimName: getStoragePVName(request.UserID),
 				},
 			},
 		}, nil
@@ -505,7 +505,7 @@ func (c *clientsetWrapper) getTargetPod(request CreatePodRequest) (apiv1.Pod, er
 
 // Generate an api object for the PV to attempt to create for the user's /tank/storage
 func getUserStoragePV(request CreatePodRequest) *apiv1.PersistentVolume {
-	name := getStoragePVName(request.RemoteIP, request.UserID)
+	name := getStoragePVName(request.UserID)
 	user, domain, _ := strings.Cut(request.UserID, "@")
 	return &apiv1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
@@ -514,6 +514,7 @@ func getUserStoragePV(request CreatePodRequest) *apiv1.PersistentVolume {
 				"name":   name,
 				"user":   user,
 				"domain": domain,
+				"server": request.RemoteIP,
 			},
 		},
 		Spec: apiv1.PersistentVolumeSpec{
@@ -546,7 +547,7 @@ func getUserStoragePV(request CreatePodRequest) *apiv1.PersistentVolume {
 
 // Generate an api object for the PVC to attempt to create for the user's /tank/storage
 func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
-	name := getStoragePVName(request.RemoteIP, request.UserID)
+	name := getStoragePVName(request.UserID)
 	user, domain, _ := strings.Cut(request.UserID, "@")
 	return &apiv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -556,6 +557,7 @@ func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
 				"name":   name,
 				"user":   user,
 				"domain": domain,
+				"server": request.RemoteIP,
 			},
 		},
 		Spec: apiv1.PersistentVolumeClaimSpec{
@@ -576,7 +578,7 @@ func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
 // Check that the PV and PVC for the user's /tank/storage directory exist
 // Should be called iff the pod has a volume named "sciencedata"
 func (c *clientsetWrapper) ensureUserStorageExists(request CreatePodRequest) error {
-	name := getStoragePVName(request.RemoteIP, request.UserID)
+	name := getStoragePVName(request.UserID)
 	listOptions := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
 	PVList, err := c.ClientListPV(listOptions)
 	if err != nil {
@@ -688,7 +690,7 @@ func (c *clientsetWrapper) podExec(command []string, pod *apiv1.Pod) (bytes.Buff
 
 // Try up to 5 times to copy /tmp/"key" in the created pod into /tmp
 func (c *clientsetWrapper) copyToken(key string, pod *apiv1.Pod) error {
-	filename := fmt.Sprintf("/tmp/%s/%s", pod.Name, key)
+	filename := fmt.Sprintf("/tmp/tokens/%s/%s", pod.Name, key)
 	var stdout, stderr bytes.Buffer
 	var err error
 	for i := 0; i < 5; i++ {
@@ -716,7 +718,7 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 		}
 	}
 	if len(toCopy) > 0 {
-		err := os.Mkdir(fmt.Sprintf("/tmp/%s", pod.Name), 0700)
+		err := os.Mkdir(fmt.Sprintf("/tmp/tokens/%s", pod.Name), 0700)
 		if err != nil {
 			fmt.Printf("Couldn't create dir to copy tokens for %s: %s\n", pod.Name, err.Error())
 			return
@@ -814,7 +816,7 @@ func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest) error {
 	if request.UserID == "" {
 		return nil
 	}
-	name := getStoragePVName(request.RemoteIP, request.UserID)
+	name := getStoragePVName(request.UserID)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
 	pvcList, err := c.ClientListPVC(opts)
 	if err != nil {
@@ -823,7 +825,7 @@ func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest) error {
 	if len(pvcList.Items) > 0 {
 		err = c.ClientDeletePVC(name)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Error: Failed to delete PVC: %s", err.Error()))
+			return errors.New(fmt.Sprintf("Failed to delete PVC: %s", err.Error()))
 		}
 	}
 	pvList, err := c.ClientListPV(opts)
@@ -833,7 +835,7 @@ func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest) error {
 	if len(pvList.Items) > 0 {
 		err = c.ClientDeletePV(name)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Error: Failed to delete PV: %s", err.Error()))
+			return errors.New(fmt.Sprintf("Failed to delete PV: %s", err.Error()))
 		}
 	}
 	return nil
@@ -859,6 +861,124 @@ func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest) error {
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error while removing user storage: %s", err.Error()))
 	}
+	return nil
+}
+
+// Get the user ID to whom a PV belongs if it is a valid user storage,
+// otherwise return an empty string
+func getPVUserID(pv apiv1.PersistentVolume) string {
+	user := pv.ObjectMeta.Labels["user"]
+	domain := pv.ObjectMeta.Labels["domain"]
+	uid := getUserID(user, domain)
+	if pv.Name != getStoragePVName(uid) {
+		return ""
+	}
+	return uid
+}
+
+// Get the user ID to whom a PVC belongs if it is a valid user storage,
+// otherwise return an empty string
+func getPVCUserID(pvc apiv1.PersistentVolumeClaim) string {
+	user := pvc.ObjectMeta.Labels["user"]
+	domain := pvc.ObjectMeta.Labels["domain"]
+	uid := getUserID(user, domain)
+	if pvc.Name != getStoragePVName(uid) {
+		return ""
+	}
+	return uid
+}
+
+func (c *clientsetWrapper) cleanAllUnused() error {
+	podList, err := c.getUserPodList("")
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list all pods: %s\n", err.Error()))
+	}
+
+	// Get a list of all pods and pod owners
+	var podNameList []string
+	userIDsWithPods := make(map[string]bool)
+	for _, pod := range podList.Items {
+		podNameList = append(podNameList, pod.Name)
+		userID := getUserID(
+			pod.ObjectMeta.Labels["user"],
+			pod.ObjectMeta.Labels["domain"],
+		)
+		if userID != "" {
+			// use a map so that if a user has multiple pods, they will appear once in the list of keys
+			userIDsWithPods[userID] = true
+		}
+	}
+
+	// Clean Persistent Volume Claims
+	PVCList, err := c.ClientListPVC(metav1.ListOptions{})
+	for _, pvc := range PVCList.Items {
+		owner := getPVCUserID(pvc)
+		// If this PV is a user storage, it will have an owner with a nonempty name
+		if owner != "" {
+			// check whether the owner has any pods running
+			inUse := false
+			for userID := range userIDsWithPods {
+				if userID == owner {
+					inUse = true
+					break
+				}
+			}
+			// if the owner doesn't have any pods, the PV should be deleted
+			if !inUse {
+				err := c.ClientDeletePVC(pvc.Name)
+				if err != nil {
+					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pvc.Name, err.Error()))
+				}
+			}
+		}
+	}
+
+	// Clean Persistent Volumes
+	PVList, err := c.ClientListPV(metav1.ListOptions{})
+	for _, pv := range PVList.Items {
+		owner := getPVUserID(pv)
+		// If this PV is a user storage, it will have an owner with a nonempty name
+		if owner != "" {
+			// check whether the owner has any pods running
+			inUse := false
+			for userID := range userIDsWithPods {
+				if userID == owner {
+					inUse = true
+					break
+				}
+			}
+			// if the owner doesn't have any pods, the PV should be deleted
+			if !inUse {
+				err := c.ClientDeletePV(pv.Name)
+				if err != nil {
+					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pv.Name, err.Error()))
+				}
+			}
+		}
+	}
+
+	// Clean Temporary Files
+	files, err := ioutil.ReadDir("/tmp/tokens/")
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list token directory: %s\n", err.Error()))
+	}
+	for _, file := range files {
+		filename := file.Name()
+		inUse := false
+		for _, podName := range podNameList {
+			if podName == filename {
+				inUse = true
+				break
+			}
+		}
+		if !inUse {
+			err = os.RemoveAll(fmt.Sprintf("/tmp/tokens/%s", filename))
+			if err != nil {
+				return errors.New(fmt.Sprintf("Couldn't delete unused files: %s\n", err.Error()))
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -905,7 +1025,9 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanSto
 	// if the user has no other pods, then:
 	if cleanStorage {
 		err = c.cleanUserStorage(request)
-		fmt.Printf("Couldn't clean user storage for %s after pod deletion: %s\n", request.UserID, err.Error())
+		if err != nil {
+			fmt.Printf("Couldn't clean user storage for %s after pod deletion: %s\n", request.UserID, err.Error())
+		}
 	}
 
 	finished <- true
