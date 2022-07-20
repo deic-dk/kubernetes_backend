@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -76,11 +77,6 @@ type clientsetWrapper struct {
 	clientset *kubernetes.Clientset
 }
 
-type startJobber struct {
-	pod       *apiv1.Pod
-	clientset *kubernetes.Clientset
-}
-
 func (c *clientsetWrapper) ClientListPods(opt metav1.ListOptions) (*apiv1.PodList, error) {
 	return c.clientset.CoreV1().Pods(namespace).List(context.TODO(), opt)
 }
@@ -121,8 +117,6 @@ func (c *clientsetWrapper) ClientCreatePV(target *apiv1.PersistentVolume) (*apiv
 	return c.clientset.CoreV1().PersistentVolumes().Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
-
-
 // Generate the structs with methods for interacting with the k8s api.
 func getClientset() *kubernetes.Clientset {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
@@ -139,6 +133,19 @@ func getClientset() *kubernetes.Clientset {
 }
 
 // GET PODS FUNCTIONS
+
+// Wrapper for ClientListPods that selects labels for the given username,
+// lists all pods for username=""
+func (c *clientsetWrapper) getUserPodList(username string) (*apiv1.PodList, error) {
+	var listOpts metav1.ListOptions
+	if username == "" {
+		listOpts = metav1.ListOptions{}
+	} else {
+		user, domain, _ := strings.Cut(username, "@")
+		listOpts = metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
+	}
+	return c.ClientListPods(listOpts)
+}
 
 // "Un-cut" the username string from the user and domain strings
 func getUserID(user string, domain string) string {
@@ -185,18 +192,11 @@ func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
 // If the username string is empty, use all pods in the namespace.
 func (c *clientsetWrapper) getPods(username string) ([]GetPodsResponse, error) {
 	var response []GetPodsResponse
-	var opts metav1.ListOptions
-	if len(username) < 1 {
-		opts = metav1.ListOptions{}
-	} else {
-		user, domain, _ := strings.Cut(username, "@")
-		opts = metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
-	}
-	podlist, err := c.ClientListPods(opts)
+	podList, err := c.getUserPodList(username)
 	if err != nil {
 		return response, err
 	}
-	for _, existingPod := range podlist.Items {
+	for _, existingPod := range podList.Items {
 		podInfo := fillPodResponse(existingPod)
 		response = append(response, podInfo)
 	}
@@ -688,7 +688,7 @@ func (c *clientsetWrapper) podExec(command []string, pod *apiv1.Pod) (bytes.Buff
 
 // Try up to 5 times to copy /tmp/"key" in the created pod into /tmp
 func (c *clientsetWrapper) copyToken(key string, pod *apiv1.Pod) error {
-	filename := fmt.Sprintf("/tmp/%s-%s", pod.Name, key)
+	filename := fmt.Sprintf("/tmp/%s/%s", pod.Name, key)
 	var stdout, stderr bytes.Buffer
 	var err error
 	for i := 0; i < 5; i++ {
@@ -713,6 +713,13 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 	for key, value := range pod.ObjectMeta.Annotations {
 		if value == "copyForFrontend" {
 			toCopy = append(toCopy, key)
+		}
+	}
+	if len(toCopy) > 0 {
+		err := os.Mkdir(fmt.Sprintf("/tmp/%s", pod.Name), 0700)
+		if err != nil {
+			fmt.Printf("Couldn't create dir to copy tokens for %s: %s\n", pod.Name, err.Error())
+			return
 		}
 	}
 	for _, key := range toCopy {
@@ -804,6 +811,9 @@ func (c *clientsetWrapper) serveCreatePod(w http.ResponseWriter, r *http.Request
 
 // Delete lingering PV and PVCs for user storage if they exist
 func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest) error {
+	if request.UserID == "" {
+		return nil
+	}
 	name := getStoragePVName(request.RemoteIP, request.UserID)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
 	pvcList, err := c.ClientListPVC(opts)
@@ -835,14 +845,11 @@ func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest) error {
 	if request.UserID == "" {
 		return errors.New("Need username of owner of pods to be deleted")
 	}
-	user, domain, _ := strings.Cut(request.UserID, "@")
-	podlist, err := c.ClientListPods(
-		metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)},
-	)
+	podList, err := c.getUserPodList(request.UserID)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list user's pods: %s", err.Error()))
 	}
-	for _, pod := range podlist.Items {
+	for _, pod := range podList.Items {
 		err = c.ClientDeletePod(pod.Name)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
@@ -864,7 +871,25 @@ func signalPodDeleted(watcher watch.Interface, ch chan bool) {
 	}
 }
 
-func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, finished chan bool) {
+func (c *clientsetWrapper) cleanTempFiles(request DeletePodRequest) error {
+	dirName := fmt.Sprintf("/tmp/%s", request.PodName)
+	_, err := os.Stat(dirName)
+	// If the tmp directory for tokens doesn't exist, return without error
+	if os.IsNotExist(err) {
+		return nil
+	}
+	// If there is a different error, return it
+	if err != nil {
+		return err
+	}
+	err = os.RemoveAll(dirName)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanStorage bool, finished chan bool) {
 	deleted := c.waitPod(request.PodName, podDeleteTimeout, signalPodDeleted)
 	if !deleted {
 		fmt.Printf("Pod %s didn't finish deleting before timeout. Cleanup jobs not attempted.\n", request.PodName)
@@ -872,8 +897,16 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, finished
 		return
 	}
 
+	err := c.cleanTempFiles(request)
+	if err != nil {
+		fmt.Printf("Couldn't clean directory of temp files for %s: %s\n", request.PodName, err.Error())
+	}
+
 	// if the user has no other pods, then:
-	// err := c.cleanUserStorage(request)
+	if cleanStorage {
+		err = c.cleanUserStorage(request)
+		fmt.Printf("Couldn't clean user storage for %s after pod deletion: %s\n", request.UserID, err.Error())
+	}
 
 	finished <- true
 }
@@ -883,32 +916,31 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, finished
 // push finished<-true when clean up tasks complete successfully
 func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan bool) error {
 	// check whether the pod exists, searching by user if username given
-	var listOpts metav1.ListOptions
-	if len(request.UserID) < 1 {
-		listOpts = metav1.ListOptions{}
-	} else {
-		user, domain, _ := strings.Cut(request.UserID, "@")
-		listOpts = metav1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)}
-	}
-	podlist, err := c.ClientListPods(listOpts)
+	podList, err := c.getUserPodList(request.UserID)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error: Couldn't list pods to check for deletion: %s", err.Error()))
 	}
-	indexDelete := -1
-	for i, pod := range podlist.Items {
+	foundPod := false
+	for _, pod := range podList.Items {
 		if pod.ObjectMeta.Name == request.PodName {
-			indexDelete = i
+			foundPod = true
 			break
 		}
 	}
 	// The index isn't used in the Pods.Delete request, but this serves as a necessary check
 	// that the user and domain tags of the pod match the request.UserID
-	if indexDelete == -1 {
-		return errors.New("Pod doesn't exist, cannot be deleted")
+	if !foundPod {
+		return errors.New("Pod doesn't exist or isn't owned by given user, cannot be deleted")
+	}
+
+	cleanStorage := false
+	// If there are no other pods owned by the user, then clean user storage after successful pod deletion
+	if len(podList.Items) < 2 {
+		cleanStorage = true
 	}
 
 	// Start watching the pod to perform cleanup once it's deleted
-	go c.deletePodCleanJobs(request, finished)
+	go c.deletePodCleanJobs(request, cleanStorage, finished)
 	// delete it
 	err = c.ClientDeletePod(request.PodName)
 	if err != nil {
