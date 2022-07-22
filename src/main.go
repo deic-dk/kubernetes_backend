@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"reflect"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -157,6 +158,7 @@ func signalPodReady(watcher watch.Interface, ch chan<- bool) {
 				if condition.Type == apiv1.PodReady {
 					// If the pod is ready, then stop watching, so the event loop will terminate
 					if condition.Status == apiv1.ConditionTrue {
+						fmt.Printf("READY POD: %s\n", eventPod.Name)
 						watcher.Stop()
 						trySend(ch, true)
 					}
@@ -167,10 +169,42 @@ func signalPodReady(watcher watch.Interface, ch chan<- bool) {
 	}
 }
 
+// Log that an event.Object has been deleted
+func announceDeleted(obj runtime.Object) {
+	// get its kind
+	// unfortunately the kind isn't stored in any of the fields, but is contained in the object type
+	typeStr := fmt.Sprintf("%s", reflect.TypeOf(obj))
+	var kindStr string
+	switch typeStr {
+	case "*v1.Pod":
+		kindStr = "POD"
+	case "*v1.PersistentVolume":
+		kindStr = "PV"
+	case "*v1.PersistentVolumeClaim":
+		kindStr = "PVC"
+	default:
+		kindStr = "?"
+		fmt.Printf("Unknown typestr: %s\n", typeStr)
+	}
+
+	// Get the object's name
+	unstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		fmt.Printf("Error while announcing deletion: %s\n%+v\n", err.Error(), obj)
+		return
+	}
+	metadata := unstructured["metadata"].(map[string]interface{})
+	name := metadata["name"].(string)
+
+	// And write the log
+	fmt.Printf("DELETED %s: %s\n", kindStr, name)
+}
+
 // Push ch<-true when the object watcher is watching is deleted
 func signalDeleted(watcher watch.Interface, ch chan<- bool) {
 	for event := range watcher.ResultChan() {
 		if event.Type == watch.Deleted {
+			announceDeleted(event.Object)
 			watcher.Stop()
 			trySend(ch, true)
 		}
@@ -183,6 +217,7 @@ func signalPVReady(watcher watch.Interface, ch chan<- bool) {
 		if event.Type == watch.Modified {
 			pv := event.Object.(*apiv1.PersistentVolume)
 			if pv.Status.Phase == apiv1.VolumeAvailable {
+				fmt.Printf("AVAILABLE PV: %s\n", pv.Name)
 				watcher.Stop()
 				trySend(ch, true)
 			}
@@ -194,8 +229,9 @@ func signalPVReady(watcher watch.Interface, ch chan<- bool) {
 func signalPVCReady(watcher watch.Interface, ch chan<- bool) {
 	for event := range watcher.ResultChan() {
 		if event.Type == watch.Modified {
-			pv := event.Object.(*apiv1.PersistentVolumeClaim)
-			if pv.Status.Phase == apiv1.ClaimBound {
+			pvc := event.Object.(*apiv1.PersistentVolumeClaim)
+			if pvc.Status.Phase == apiv1.ClaimBound {
+				fmt.Printf("BOUND PVC: %s\n", pvc.Name)
 				watcher.Stop()
 				trySend(ch, true)
 			}
@@ -848,7 +884,6 @@ func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, podReady <-chan bo
 		trySend(finished, false)
 		return
 	}
-	fmt.Printf("POD READY: %s\n", pod.Name)
 
 	// Perform start jobs here
 	c.copyAllTokens(pod)
@@ -1054,10 +1089,8 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanSto
 		}
 		// Block until PV and PVC are deleted or timeout
 		storageClean = <-ch
-		if storageClean {
-			fmt.Printf("DELETED PV and PVC: %s\n", getStoragePVName(request.UserID))
-		} else {
-			fmt.Printf("FAILED TO DELETE PV and PVC: %s\n", getStoragePVName(request.UserID))
+		if ! storageClean {
+			fmt.Printf("FAILED TO DELETE PV and/or PVC: %s\n", getStoragePVName(request.UserID))
 		}
 	}
 
