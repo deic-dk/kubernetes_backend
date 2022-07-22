@@ -9,10 +9,10 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
-	"reflect"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -979,12 +979,18 @@ func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest, finished c
 	if err != nil {
 		return err
 	}
+	// If there is a PVC to be deleted, request it and listen on PVCfinished
 	if len(pvcList.Items) > 0 {
 		err = c.ClientDeletePVC(name, PVCfinished)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Failed to delete PVC: %s", err.Error()))
+			return errors.New(fmt.Sprintf("Failed to request deletion of PVC: %s", err.Error()))
 		}
+	} else {
+		// Otherwise, PVCfinished should be signalled now
+		PVCfinished <- true
 	}
+
+	// Repeat for the Persistent Volume
 	PVfinished := make(chan bool, 1)
 	pvList, err := c.ClientListPV(opts)
 	if err != nil {
@@ -993,8 +999,10 @@ func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest, finished c
 	if len(pvList.Items) > 0 {
 		err = c.ClientDeletePV(name, PVfinished)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Failed to delete PV: %s", err.Error()))
+			return errors.New(fmt.Sprintf("Failed to request deletion of PV: %s", err.Error()))
 		}
+	} else {
+		PVfinished <- true
 	}
 	go combineBoolChannels([]<-chan bool{PVCfinished, PVfinished}, finished)
 	return nil
@@ -1018,6 +1026,10 @@ func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest, finished 
 			return errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
 		}
 		allChans = append(allChans, podChan)
+		err = c.cleanTempFiles(pod.Name)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Error while cleaning pod files: %s", err.Error()))
+		}
 	}
 	storageChan := make(chan bool, 1)
 	err = c.cleanUserStorage(request, storageChan)
@@ -1045,8 +1057,8 @@ func getPodTokenDir(podName string) string {
 	return fmt.Sprintf("/tmp/tokens/%s", podName)
 }
 
-func (c *clientsetWrapper) cleanTempFiles(request DeletePodRequest) error {
-	dirName := getPodTokenDir(request.PodName)
+func (c *clientsetWrapper) cleanTempFiles(podName string) error {
+	dirName := getPodTokenDir(podName)
 	_, err := os.Stat(dirName)
 	// If the tmp directory for tokens doesn't exist, return without error
 	if os.IsNotExist(err) {
@@ -1068,12 +1080,10 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanSto
 		fmt.Printf("Pod %s didn't finish deleting before timeout. Cleanup jobs not attempted.\n", request.PodName)
 		trySend(finished, false)
 		return
-	} else {
-		fmt.Printf("DELETED POD: %s\n", request.PodName)
 	}
 
 	tempFilesOkay := true
-	err := c.cleanTempFiles(request)
+	err := c.cleanTempFiles(request.PodName)
 	if err != nil {
 		fmt.Printf("Couldn't clean directory of temp files for %s: %s\n", request.PodName, err.Error())
 		tempFilesOkay = false
@@ -1089,9 +1099,6 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanSto
 		}
 		// Block until PV and PVC are deleted or timeout
 		storageClean = <-ch
-		if ! storageClean {
-			fmt.Printf("FAILED TO DELETE PV and/or PVC: %s\n", getStoragePVName(request.UserID))
-		}
 	}
 
 	// Once all jobs finish, finished<-true iff all jobs finished successfully
@@ -1127,7 +1134,7 @@ func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan<- b
 	podDeleted := make(chan bool, 1)
 	err = c.ClientDeletePod(request.PodName, podDeleted)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error: Failed to request pod deletion: %s", err.Error()))
+		return errors.New(fmt.Sprintf("Error: Failed to request deletion of Pod: %s", err.Error()))
 	}
 	go c.deletePodCleanJobs(request, cleanStorage, podDeleted, finished)
 

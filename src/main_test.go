@@ -3,122 +3,213 @@ package main
 import (
 	"testing"
 
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"context"
 	"fmt"
+
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"strings"
-	"time"
+	//v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	//"context"
+	//"time"
 )
 
-func TestCreatePod(t *testing.T) {
-	clientset := getClientset()
-	podClient := clientset.CoreV1().Pods(namespace)
-	PVClient := clientset.CoreV1().PersistentVolumes()
-	PVCClient := clientset.CoreV1().PersistentVolumeClaims(namespace)
+const (
+	userID = "registeredtest7"
+	userIP = "10.0.0.20"
+)
 
-	// Settings for the test user
-	userID := "registeredtest7"
-	userIP := "10.0.0.20"
-	user, domain, _ := strings.Cut(userID, "@")
-
-	// First clear the user's pods
-	deleteRequest := DeletePodRequest{
-		UserID: userID,
-		RemoteIP: userIP,
-	}
-	err := deleteAllPodsUser(deleteRequest, podClient, PVClient, PVCClient)
-	if err != nil {
-		t.Fatalf("Couldn't delete user pods: %s", err.Error())
-	}
-	time.Sleep(1 * time.Second)
-
-	// Make the CreatePodRequest
-	request := CreatePodRequest{
+func createJupyterRequest(userIP string, userID string) CreatePodRequest {
+	return CreatePodRequest{
 		UserID: userID,
 		ContainerEnvVars: map[string]map[string]string{
-			"jupyter": map[string]string{
-				"FILE": "foo",
+			"jupyter": {
+				"FILE":              "foo",
 				"WORKING_DIRECTORY": "foobar",
 			},
 		},
 		AllEnvVars: map[string]string{
 			"HOME_SERVER": userIP,
-			"SD_UID": userID,
+			"SD_UID":      userID,
 		},
-		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
 		RemoteIP: userIP,
 	}
+}
 
-	// Call createPod with the request a few times
-	// name0, err := createPod(request, podClient, PVClient, PVCClient)
-	name0, err := createPod(request, podClient, PVClient, PVCClient)
-	if err != nil {
-		t.Fatalf("Couldn't create pod: %s", err.Error())
+func deleteJupyterRequest(userIP string, userID string, n int) DeletePodRequest {
+	numString := ""
+	if n > 0 {
+		numString = fmt.Sprintf("-%d", n)
 	}
-	time.Sleep(1 * time.Second)
-	name1, err := createPod(request, podClient, PVClient, PVCClient)
-	if err != nil {
-		t.Fatalf("Couldn't create pod: %s", err.Error())
+	return DeletePodRequest{
+		UserID:   userID,
+		RemoteIP: userIP,
+		PodName:  fmt.Sprintf("jupyter-%s%s", getUserString(userID), numString),
 	}
-	time.Sleep(1 * time.Second)
-	name2, err := createPod(request, podClient, PVClient, PVCClient)
-	if err != nil {
-		t.Fatalf("Couldn't create pod: %s", err.Error())
-	}
-	time.Sleep(1 * time.Second)
+}
 
-	t.Logf("Success. Created: %s, %s, %s", name0, name1, name2)
+func TestCreationDeletion(t *testing.T) {
+	c := clientsetWrapper{clientset: getClientset()}
 
-	testuserPodList, err := podClient.List(
-		context.TODO(),
-		v1.ListOptions{
-			LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain),
-		},
-	)
-	if len(testuserPodList.Items) != 3 {
-		t.Fatalf("Incorrect number of pods exists after creation")
-	}
-	time.Sleep(1 * time.Second)
+	// Settings for the test user
 
-	storageListOptions := v1.ListOptions{
-		LabelSelector: fmt.Sprintf("name=%s", getStoragePVName(userIP, userID)),
-	}
-	volumeList, err := PVClient.List(context.TODO(), storageListOptions)
-	if err != nil {
-		t.Fatalf("Couldn't list volumes: %s", err.Error())
-	}
-	if len(volumeList.Items) != 1 {
-		t.Fatalf("User storage PV doesn't exist")
-	}
-	claimList, err := PVCClient.List(context.TODO(), storageListOptions)
-	if err != nil {
-		t.Fatalf("Couldn't list volume claims: %s", err.Error())
-	}
-	if len(claimList.Items) != 1 {
-		t.Fatalf("User storage PVC doesn't exist")
-	}
-
-	// Check the success of any started jobs (like copying keys)
-
-	// Clean up
-	err = deleteAllPodsUser(deleteRequest, podClient, PVClient, PVCClient)
-	time.Sleep(2 * time.Second)
+	// First clear the user's pods
+	ch := make(chan bool, 1)
+	err := c.deleteAllPodsUser(deleteJupyterRequest(userIP, userID, 0), ch)
 	if err != nil {
 		t.Fatalf("Couldn't delete user pods: %s", err.Error())
 	}
-	volumeList, err = PVClient.List(context.TODO(), storageListOptions)
+	if !<-ch {
+		t.Fatalf("Failure while deleting all user resources: %s", err.Error())
+	} else {
+		t.Log("Successfully deleted all user resources")
+	}
+
+	// Call createPod a few times
+	request := createJupyterRequest(userIP, userID)
+	n := 5
+	podNames := make([]string, n)
+	chans := make([]<-chan bool, n)
+	for i := 0; i < n; i++ {
+		ch := make(chan bool, 1)
+		name, err := c.createPod(request, ch)
+		if err != nil {
+			t.Fatalf("Couldn't create pod: %s", err.Error())
+		}
+		podNames[i] = name
+		chans[i] = ch
+	}
+	chanAll := make(chan bool, 1)
+	combineBoolChannels(chans, chanAll)
+	if <-chanAll {
+		t.Logf("Success: created all pods")
+	} else {
+		t.Fatalf("Pods didn't reach ready state")
+	}
+
+	user, domain, _ := strings.Cut(userID, "@")
+	podList, err := c.ClientListPods(v1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)})
 	if err != nil {
-		t.Fatalf("Couldn't list volumes: %s", err.Error())
+		t.Fatalf("Couldn't list pods: %s", err.Error())
 	}
-	if len(volumeList.Items) != 0 {
-		t.Fatalf("User storage PV wasn't deleted")
+	if len(podList.Items) == n {
+		t.Logf("Correct number of pods exist")
+	} else {
+		t.Fatalf("%d pods exist. Expected %d", len(podList.Items), n)
 	}
-	claimList, err = PVCClient.List(context.TODO(), storageListOptions)
+
+	storageListOptions := v1.ListOptions{
+		LabelSelector: fmt.Sprintf("name=%s", getStoragePVName(userID)),
+	}
+	PVList, err := c.ClientListPV(storageListOptions)
 	if err != nil {
-		t.Fatalf("Couldn't list volume claims: %s", err.Error())
+		t.Fatalf("Couldn't list PVs: %s", err.Error())
 	}
-	if len(claimList.Items) != 0 {
-		t.Fatalf("User storage PVC wasn't deleted")
+	if len(PVList.Items) == 1 {
+		t.Logf("User storage PV exists")
+	} else {
+		t.Fatalf("User storage PV doesn't exist")
+	}
+
+	PVCList, err := c.ClientListPVC(storageListOptions)
+	if err != nil {
+		t.Fatalf("Couldn't list PVCs: %s", err.Error())
+	}
+	if len(PVCList.Items) == 1 {
+		t.Logf("User storage PVC exists")
+	} else {
+		t.Fatalf("User storage PVC doesn't exist")
+	}
+
+	// Then test deletion
+	chanAllDelete := make([]<-chan bool, n-1)
+	for i := 0; i < (n - 1); i++ {
+		ch := make(chan bool, 1)
+		err := c.deletePod(deleteJupyterRequest(userIP, userID, i), ch)
+		if err != nil {
+			t.Fatalf("Failed to delete: %s", err.Error())
+		}
+		chanAllDelete[i] = ch
+	}
+	chanDeleted := make(chan bool, 1)
+	combineBoolChannels(chanAllDelete, chanDeleted)
+	if <-chanDeleted {
+		t.Logf("Deleted %d of the pods", n-1)
+	} else {
+		t.Fatalf("Didn't succeed in deleteding pods")
+	}
+
+	// Now there should be one pod and the storage should still be present
+	podList, err = c.ClientListPods(v1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)})
+	if err != nil {
+		t.Fatalf("Couldn't list pods: %s", err.Error())
+	}
+	if len(podList.Items) == 1 {
+		t.Logf("Correct number of pods exist")
+	} else {
+		t.Fatalf("%d pods exist. Expected %d", len(podList.Items), n)
+	}
+
+	PVList, err = c.ClientListPV(storageListOptions)
+	if err != nil {
+		t.Fatalf("Couldn't list PVs: %s", err.Error())
+	}
+	if len(PVList.Items) == 1 {
+		t.Logf("User storage PV still exists")
+	} else {
+		t.Fatalf("User storage PV doesn't exist")
+	}
+
+	PVCList, err = c.ClientListPVC(storageListOptions)
+	if err != nil {
+		t.Fatalf("Couldn't list PVCs: %s", err.Error())
+	}
+	if len(PVList.Items) == 1 {
+		t.Logf("User storage PVC still exists")
+	} else {
+		t.Fatalf("User storage PVC doesn't exist")
+	}
+
+	// Delete the last pod
+	chanFinalDelete := make(chan bool)
+	err = c.deletePod(deleteJupyterRequest(userIP, userID, n-1), chanFinalDelete)
+	if err != nil {
+		t.Fatalf("Couldn't delete last pod: %s", err.Error())
+	}
+	if <-chanFinalDelete {
+		t.Logf("Deleted final pod")
+	} else {
+		t.Fatalf("Final pod wasn't deleted")
+	}
+
+	podList, err = c.ClientListPods(v1.ListOptions{LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain)})
+	if err != nil {
+		t.Fatalf("Couldn't list pods: %s", err.Error())
+	}
+	if len(podList.Items) == 0 {
+		t.Logf("Correct number of pods exist")
+	} else {
+		t.Fatalf("%d pods exist. Expected %d", len(podList.Items), n)
+	}
+
+	// Now the storage should have been removed
+	PVList, err = c.ClientListPV(storageListOptions)
+	if err != nil {
+		t.Fatalf("Couldn't list PVs: %s", err.Error())
+	}
+	if len(PVList.Items) == 0 {
+		t.Logf("User storage PV successfully removed")
+	} else {
+		t.Fatalf("User storage PV still exists")
+	}
+
+	PVCList, err = c.ClientListPVC(storageListOptions)
+	if err != nil {
+		t.Fatalf("Couldn't list PVCs: %s", err.Error())
+	}
+	if len(PVList.Items) == 0 {
+		t.Logf("User storage PVC successfully removed")
+	} else {
+		t.Fatalf("User storage PVC still exists")
 	}
 
 	t.Log("Success, cleaned up created resources")
