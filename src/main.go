@@ -29,8 +29,8 @@ const namespace = "sciencedata-dev"
 const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-dk\\/pod_manifests"
 const sciencedataPrivateNet = "10.2."
 const sciencedataInternalNet = "10.0."
-const podReadyTimeout = 10 * time.Second
-const podDeleteTimeout = 30 * time.Second
+const timeoutCreate = 30 * time.Second
+const timeoutDelete = 30 * time.Second
 
 type GetPodsRequest struct {
 	UserID string `json:"user_id"`
@@ -77,46 +77,6 @@ type clientsetWrapper struct {
 	clientset *kubernetes.Clientset
 }
 
-func (c *clientsetWrapper) ClientListPods(opt metav1.ListOptions) (*apiv1.PodList, error) {
-	return c.clientset.CoreV1().Pods(namespace).List(context.TODO(), opt)
-}
-
-func (c *clientsetWrapper) ClientDeletePod(name string) error {
-	return c.clientset.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
-}
-
-func (c *clientsetWrapper) ClientCreatePod(target *apiv1.Pod) (*apiv1.Pod, error) {
-	return c.clientset.CoreV1().Pods(namespace).Create(context.TODO(), target, metav1.CreateOptions{})
-}
-
-func (c *clientsetWrapper) ClientWatchPod(opt metav1.ListOptions) (watch.Interface, error) {
-	return c.clientset.CoreV1().Pods(namespace).Watch(context.TODO(), opt)
-}
-
-func (c *clientsetWrapper) ClientListPVC(opt metav1.ListOptions) (*apiv1.PersistentVolumeClaimList, error) {
-	return c.clientset.CoreV1().PersistentVolumeClaims(namespace).List(context.TODO(), opt)
-}
-
-func (c *clientsetWrapper) ClientDeletePVC(name string) error {
-	return c.clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
-}
-
-func (c *clientsetWrapper) ClientCreatePVC(target *apiv1.PersistentVolumeClaim) (*apiv1.PersistentVolumeClaim, error) {
-	return c.clientset.CoreV1().PersistentVolumeClaims(namespace).Create(context.TODO(), target, metav1.CreateOptions{})
-}
-
-func (c *clientsetWrapper) ClientListPV(opt metav1.ListOptions) (*apiv1.PersistentVolumeList, error) {
-	return c.clientset.CoreV1().PersistentVolumes().List(context.TODO(), opt)
-}
-
-func (c *clientsetWrapper) ClientDeletePV(name string) error {
-	return c.clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), name, metav1.DeleteOptions{})
-}
-
-func (c *clientsetWrapper) ClientCreatePV(target *apiv1.PersistentVolume) (*apiv1.PersistentVolume, error) {
-	return c.clientset.CoreV1().PersistentVolumes().Create(context.TODO(), target, metav1.CreateOptions{})
-}
-
 // Generate the structs with methods for interacting with the k8s api.
 func getClientset() *kubernetes.Clientset {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
@@ -130,6 +90,159 @@ func getClientset() *kubernetes.Clientset {
 		panic(err.Error())
 	}
 	return clientset
+}
+
+// K8S CLIENT UTILITY FUNCTIONS
+
+// Set up a watcher to pass to signalFunc, which should ch<-true when the desired event occurs
+func (c *clientsetWrapper) watchFor(
+	name string,
+	timeout time.Duration,
+	resourceType string,
+	signalFunc func(watch.Interface, chan<- bool),
+	ch chan<- bool,
+) {
+	listOptions := metav1.ListOptions{FieldSelector: fmt.Sprintf("metadata.name=%s", name)}
+	var err error
+	var watcher watch.Interface
+	// create a watcher for the API resource of the correct type
+	switch resourceType {
+	case "Pod":
+		watcher, err = c.clientset.CoreV1().Pods(namespace).Watch(context.TODO(), listOptions)
+	case "PV":
+		watcher, err = c.clientset.CoreV1().PersistentVolumes().Watch(context.TODO(), listOptions)
+	case "PVC":
+		watcher, err = c.clientset.CoreV1().PersistentVolumeClaims(namespace).Watch(context.TODO(), listOptions)
+	default:
+		err = errors.New("Unsupported resource type for watcher")
+	}
+	if err != nil {
+		ch <- false
+		fmt.Printf("Error in watchFor: %s\n", err.Error())
+		return
+	}
+	// In a goroutine, sleep for the timeout duration and then push ch<-false
+	time.AfterFunc(timeout, func() {
+		watcher.Stop()
+		select {
+		case ch <- false:
+		default:
+		}
+	})
+	// In this goroutine, call the function to ch<-true when the desired event occurs
+	signalFunc(watcher, ch)
+}
+
+// Do ch<-value if the channel is ready to receive a value,
+// otherwise do nothing
+// This allows the goroutine attempting a send to continue without blocking
+// To ensure ch can take a value, make it a buffered channel with enough space
+func trySend(ch chan<- bool, value bool) {
+	select {
+	case ch <- value:
+	default:
+	}
+}
+
+// Push ch<-true when watcher receives an event for a ready pod
+func signalPodReady(watcher watch.Interface, ch chan<- bool) {
+	// Run this loop every time an event is ready in the watcher channel
+	for event := range watcher.ResultChan() {
+		// the event.Object is only sure to be an apiv1.Pod if the event.Type is Modified
+		if event.Type == watch.Modified {
+			// event.Object is a new runtime.Object with the pod in its state after the event
+			eventPod := event.Object.(*apiv1.Pod)
+			// Loop through the pod conditions to find the one that's "Ready"
+			for _, condition := range eventPod.Status.Conditions {
+				if condition.Type == apiv1.PodReady {
+					// If the pod is ready, then stop watching, so the event loop will terminate
+					if condition.Status == apiv1.ConditionTrue {
+						watcher.Stop()
+						trySend(ch, true)
+					}
+					break
+				}
+			}
+		}
+	}
+}
+
+// Push ch<-true when the object watcher is watching is deleted
+func signalDeleted(watcher watch.Interface, ch chan<- bool) {
+	for event := range watcher.ResultChan() {
+		if event.Type == watch.Deleted {
+			watcher.Stop()
+			trySend(ch, true)
+		}
+	}
+}
+
+// Push ch<-true when the Persistent Volume is ready
+func signalPVReady(watcher watch.Interface, ch chan<- bool) {
+	for event := range watcher.ResultChan() {
+		if event.Type == watch.Modified {
+			pv := event.Object.(*apiv1.PersistentVolume)
+			if pv.Status.Phase == apiv1.VolumeAvailable {
+				watcher.Stop()
+				trySend(ch, true)
+			}
+		}
+	}
+}
+
+// Push ch<-true when when Persistent Volume Claim is bound
+func signalPVCReady(watcher watch.Interface, ch chan<- bool) {
+	for event := range watcher.ResultChan() {
+		if event.Type == watch.Modified {
+			pv := event.Object.(*apiv1.PersistentVolumeClaim)
+			if pv.Status.Phase == apiv1.ClaimBound {
+				watcher.Stop()
+				trySend(ch, true)
+			}
+		}
+	}
+}
+
+func (c *clientsetWrapper) ClientListPods(opt metav1.ListOptions) (*apiv1.PodList, error) {
+	return c.clientset.CoreV1().Pods(namespace).List(context.TODO(), opt)
+}
+
+func (c *clientsetWrapper) ClientDeletePod(name string, finished chan<- bool) error {
+	go c.watchFor(name, timeoutDelete, "Pod", signalDeleted, finished)
+	return c.clientset.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
+func (c *clientsetWrapper) ClientCreatePod(target *apiv1.Pod, ready chan<- bool) (*apiv1.Pod, error) {
+	go c.watchFor(target.Name, timeoutCreate, "Pod", signalPodReady, ready)
+	return c.clientset.CoreV1().Pods(namespace).Create(context.TODO(), target, metav1.CreateOptions{})
+}
+
+func (c *clientsetWrapper) ClientListPVC(opt metav1.ListOptions) (*apiv1.PersistentVolumeClaimList, error) {
+	return c.clientset.CoreV1().PersistentVolumeClaims(namespace).List(context.TODO(), opt)
+}
+
+func (c *clientsetWrapper) ClientDeletePVC(name string, finished chan<- bool) error {
+	go c.watchFor(name, timeoutDelete, "PVC", signalDeleted, finished)
+	return c.clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
+func (c *clientsetWrapper) ClientCreatePVC(target *apiv1.PersistentVolumeClaim, ready chan<- bool) (*apiv1.PersistentVolumeClaim, error) {
+	go c.watchFor(target.Name, timeoutCreate, "PVC", signalPVCReady, ready)
+	return c.clientset.CoreV1().PersistentVolumeClaims(namespace).Create(context.TODO(), target, metav1.CreateOptions{})
+}
+
+func (c *clientsetWrapper) ClientListPV(opt metav1.ListOptions) (*apiv1.PersistentVolumeList, error) {
+	return c.clientset.CoreV1().PersistentVolumes().List(context.TODO(), opt)
+}
+
+func (c *clientsetWrapper) ClientDeletePV(name string, finished chan<- bool) error {
+	go c.watchFor(name, timeoutDelete, "PV", signalDeleted, finished)
+	return c.clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
+func (c *clientsetWrapper) ClientCreatePV(target *apiv1.PersistentVolume, ready chan<- bool) (*apiv1.PersistentVolume, error) {
+	go c.watchFor(target.Name, timeoutCreate, "PV", signalPVReady, ready)
+	return c.clientset.CoreV1().PersistentVolumes().Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
 // GET PODS FUNCTIONS
@@ -280,6 +393,18 @@ func getExamplePod(name string, user string, domain string) *apiv1.Pod {
 func createExamplePod(name string, user string, domain string, clientset *kubernetes.Clientset) (*apiv1.Pod, error) {
 	pod := getExamplePod(name, user, domain)
 	return clientset.CoreV1().Pods(namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
+}
+
+// Block until an input was received from each channel in chans,
+// then send combined <- chans0 && chans1 && chans2...
+func combineBoolChannels(chans []<-chan bool, combined chan<- bool) {
+	output := true
+	for _, ch := range chans {
+		if !<-ch {
+			output = false
+		}
+	}
+	combined <- output
 }
 
 // Set values in the CreatePodRequest not stated in the http request json
@@ -462,7 +587,7 @@ func applyCreatePodVolumes(targetPod *apiv1.Pod, request CreatePodRequest) error
 	return nil
 }
 
-// Generate api object for the pod to attempt to create
+// Retrieve the yaml manifest and parse it into a pod API object to attempt to create
 func (c *clientsetWrapper) getTargetPod(request CreatePodRequest) (apiv1.Pod, error) {
 	var targetPod apiv1.Pod
 
@@ -577,20 +702,24 @@ func getUserStoragePVC(request CreatePodRequest) *apiv1.PersistentVolumeClaim {
 
 // Check that the PV and PVC for the user's /tank/storage directory exist
 // Should be called iff the pod has a volume named "sciencedata"
-func (c *clientsetWrapper) ensureUserStorageExists(request CreatePodRequest) error {
+func (c *clientsetWrapper) ensureUserStorageExists(request CreatePodRequest, ready chan<- bool) error {
 	name := getStoragePVName(request.UserID)
 	listOptions := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
+	PVready := make(chan bool, 1)
+	PVCready := make(chan bool, 1)
 	PVList, err := c.ClientListPV(listOptions)
 	if err != nil {
 		return err
 	}
 	if len(PVList.Items) == 0 {
 		targetPV := getUserStoragePV(request)
-		createdPV, err := c.ClientCreatePV(targetPV)
+		createdPV, err := c.ClientCreatePV(targetPV, PVready)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("CREATED PV: %s\n", createdPV.Name)
+	} else {
+		PVready <- true
 	}
 	PVCList, err := c.ClientListPVC(listOptions)
 	if err != nil {
@@ -598,54 +727,16 @@ func (c *clientsetWrapper) ensureUserStorageExists(request CreatePodRequest) err
 	}
 	if len(PVCList.Items) == 0 {
 		targetPVC := getUserStoragePVC(request)
-		createdPVC, err := c.ClientCreatePVC(targetPVC)
+		createdPVC, err := c.ClientCreatePVC(targetPVC, PVCready)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("CREATED PVC: %s\n", createdPVC.Name)
+	} else {
+		PVCready <- true
 	}
+	go combineBoolChannels([]<-chan bool{PVready, PVCready}, ready)
 	return nil
-}
-
-// Write true into ch when watcher receives an event for a ready pod
-func signalPodReady(watcher watch.Interface, ch chan bool) {
-	// Run this loop every time an event is ready in the watcher channel
-	for event := range watcher.ResultChan() {
-		// the event.Object is only sure to be an apiv1.Pod if the event.Type is Modified
-		if event.Type == watch.Modified {
-			// event.Object is a new runtime.Object with the pod in its state after the event
-			eventPod := event.Object.(*apiv1.Pod)
-			// Loop through the pod conditions to find the one that's "Ready"
-			for _, condition := range eventPod.Status.Conditions {
-				if condition.Type == apiv1.PodReady {
-					// If the pod is ready, then stop watching, so the event loop will terminate
-					if condition.Status == apiv1.ConditionTrue {
-						watcher.Stop()
-						ch <- true
-					}
-					break
-				}
-			}
-		}
-	}
-}
-
-// Block until returning either true (signalFunc pushes true) or false (timeout reached)
-// signalFunc should take a watcher for a pod and push true when the desired state is reached
-func (c *clientsetWrapper) waitPod(podName string, timeout time.Duration, signalFunc func(watch.Interface, chan bool)) bool {
-	listOptions := metav1.ListOptions{FieldSelector: fmt.Sprintf("metadata.name=%s", podName)}
-	watcher, err := c.ClientWatchPod(listOptions)
-	if err != nil {
-		fmt.Printf("Couldn't create watcher for pod %s: %s\n", podName, err.Error())
-		return false
-	}
-	// Make a channel for the signalFunc to use when the pod is ready
-	doneChannel := make(chan bool)
-	go signalFunc(watcher, doneChannel)
-	// Write `false` into the channel after the timeout
-	time.AfterFunc(timeout, func() { doneChannel <- false })
-	// return the first input into the channel
-	return <-doneChannel
 }
 
 // call a bash function inside of a pod, with the command given as a []string of bash words
@@ -690,7 +781,7 @@ func (c *clientsetWrapper) podExec(command []string, pod *apiv1.Pod) (bytes.Buff
 
 // Try up to 5 times to copy /tmp/"key" in the created pod into /tmp
 func (c *clientsetWrapper) copyToken(key string, pod *apiv1.Pod) error {
-	filename := fmt.Sprintf("/tmp/tokens/%s/%s", pod.Name, key)
+	filename := fmt.Sprintf("%s/%s", getPodTokenDir(pod.Name), key)
 	var stdout, stderr bytes.Buffer
 	var err error
 	for i := 0; i < 5; i++ {
@@ -718,7 +809,25 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 		}
 	}
 	if len(toCopy) > 0 {
-		err := os.Mkdir(fmt.Sprintf("/tmp/tokens/%s", pod.Name), 0700)
+		dirName := getPodTokenDir(pod.Name)
+		// Check to see if the token directory exists
+		_, err := os.Stat(dirName)
+		if err != nil {
+			// If there's an error in stat for a reason other than that the directory doesn't exist,
+			if !os.IsNotExist(err) {
+				fmt.Printf("Couldn't stat directory for copied tokens for %s: %s\n", pod.Name, err.Error())
+				return
+			}
+		} else {
+			// Then the directory exists and needs to be cleaned before being recreated
+			err = os.RemoveAll(dirName)
+			if err != nil {
+				fmt.Printf("Couldn't remove old token directory for %s: %s\n", pod.Name, err.Error())
+				return
+			}
+		}
+		// Now the token directory will be created
+		err = os.Mkdir(dirName, 0700)
 		if err != nil {
 			fmt.Printf("Couldn't create dir to copy tokens for %s: %s\n", pod.Name, err.Error())
 			return
@@ -733,21 +842,23 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 }
 
 // Perform tasks that should be done for each created pod
-func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod) {
-	ready := c.waitPod(pod.Name, podReadyTimeout, signalPodReady)
-	if !ready {
-		fmt.Printf("Pod %s didn't reach ready state. Start jobs not attempted.\n", pod.Name)
+func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, podReady <-chan bool, storageReady <-chan bool, finished chan<- bool) {
+	if !(<-podReady && <-storageReady) {
+		fmt.Printf("Pod %s and/or user storage didn't reach ready state. Start jobs not attempted.\n", pod.Name)
+		trySend(finished, false)
 		return
 	}
 	fmt.Printf("POD READY: %s\n", pod.Name)
 
 	// Perform start jobs here
 	c.copyAllTokens(pod)
+
+	trySend(finished, true)
 }
 
 // Create the pod and other necessary objects, start jobs that should run with pod creation
 // If successful, return the name of the created pod and nil error
-func (c *clientsetWrapper) createPod(request CreatePodRequest) (string, error) {
+func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished chan<- bool) (string, error) {
 	// generate the pod api object to attempt to create
 	targetPod, err := c.getTargetPod(request)
 	if err != nil {
@@ -761,22 +872,26 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest) (string, error) {
 			hasUserStorage = true
 		}
 	}
+	userStorageReady := make(chan bool, 1)
 	if hasUserStorage {
-		err = c.ensureUserStorageExists(request)
+		err = c.ensureUserStorageExists(request, userStorageReady)
 		if err != nil {
 			return "", errors.New(fmt.Sprintf("Couldn't ensure user storage exists: %s", err.Error()))
 		}
+	} else {
+		userStorageReady <- true
 	}
 
 	// create the pod
-	createdPod, err := c.ClientCreatePod(&targetPod)
+	podReady := make(chan bool, 1)
+	createdPod, err := c.ClientCreatePod(&targetPod, podReady)
 	if err != nil {
 		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
 	}
 	fmt.Printf("CREATED POD: %s\n", createdPod.Name)
 	//TODO getIngress
 	//TODO copyHostkeys (in a nonblocking goroutine)
-	go c.createPodStartJobs(createdPod)
+	go c.createPodStartJobs(createdPod, userStorageReady, podReady, createPodFinished)
 
 	return createdPod.Name, nil
 }
@@ -790,14 +905,15 @@ func (c *clientsetWrapper) serveCreatePod(w http.ResponseWriter, r *http.Request
 	setAllEnvVars(&request, r)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	podName, err := c.createPod(request)
+	finished := make(chan bool, 1)
+	podName, err := c.createPod(request, finished)
 
 	var status int
 	var response CreatePodResponse
 	if err != nil {
 		status = http.StatusBadRequest
 		response.PodName = ""
-		fmt.Printf("Error: %s", err.Error())
+		fmt.Printf("Error: %s\n", err.Error())
 	} else {
 		status = http.StatusOK
 		response.PodName = podName
@@ -807,43 +923,51 @@ func (c *clientsetWrapper) serveCreatePod(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
+
+	go func() {
+		<-finished
+		close(finished)
+	}()
 }
 
 // DELETE POD FUNCTIONS
 
 // Delete lingering PV and PVCs for user storage if they exist
-func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest) error {
+func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest, finished chan<- bool) error {
 	if request.UserID == "" {
 		return nil
 	}
 	name := getStoragePVName(request.UserID)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
+	PVCfinished := make(chan bool, 1)
 	pvcList, err := c.ClientListPVC(opts)
 	if err != nil {
 		return err
 	}
 	if len(pvcList.Items) > 0 {
-		err = c.ClientDeletePVC(name)
+		err = c.ClientDeletePVC(name, PVCfinished)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Failed to delete PVC: %s", err.Error()))
 		}
 	}
+	PVfinished := make(chan bool, 1)
 	pvList, err := c.ClientListPV(opts)
 	if err != nil {
 		return err
 	}
 	if len(pvList.Items) > 0 {
-		err = c.ClientDeletePV(name)
+		err = c.ClientDeletePV(name, PVfinished)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Failed to delete PV: %s", err.Error()))
 		}
 	}
+	go combineBoolChannels([]<-chan bool{PVCfinished, PVfinished}, finished)
 	return nil
 }
 
 // Delete all the pods owned by request.UserID
 // Convenience function for testing
-func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest) error {
+func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest, finished chan<- bool) error {
 	if request.UserID == "" {
 		return errors.New("Need username of owner of pods to be deleted")
 	}
@@ -851,16 +975,22 @@ func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest) error {
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list user's pods: %s", err.Error()))
 	}
+	var allChans []<-chan bool
 	for _, pod := range podList.Items {
-		err = c.ClientDeletePod(pod.Name)
+		podChan := make(chan bool, 1)
+		err = c.ClientDeletePod(pod.Name, podChan)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
 		}
+		allChans = append(allChans, podChan)
 	}
-	err = c.cleanUserStorage(request)
+	storageChan := make(chan bool, 1)
+	err = c.cleanUserStorage(request, storageChan)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error while removing user storage: %s", err.Error()))
 	}
+	allChans = append(allChans, storageChan)
+	go combineBoolChannels(allChans, finished)
 	return nil
 }
 
@@ -876,17 +1006,12 @@ func getPVUserID(pv apiv1.PersistentVolume) string {
 	return uid
 }
 
-func signalPodDeleted(watcher watch.Interface, ch chan bool) {
-	for event := range watcher.ResultChan() {
-		if event.Type == watch.Deleted {
-			watcher.Stop()
-			ch <- true
-		}
-	}
+func getPodTokenDir(podName string) string {
+	return fmt.Sprintf("/tmp/tokens/%s", podName)
 }
 
 func (c *clientsetWrapper) cleanTempFiles(request DeletePodRequest) error {
-	dirName := fmt.Sprintf("/tmp/%s", request.PodName)
+	dirName := getPodTokenDir(request.PodName)
 	_, err := os.Stat(dirName)
 	// If the tmp directory for tokens doesn't exist, return without error
 	if os.IsNotExist(err) {
@@ -903,34 +1028,47 @@ func (c *clientsetWrapper) cleanTempFiles(request DeletePodRequest) error {
 	return nil
 }
 
-func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanStorage bool, finished chan bool) {
-	deleted := c.waitPod(request.PodName, podDeleteTimeout, signalPodDeleted)
-	if !deleted {
+func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanStorage bool, podDeleted <-chan bool, finished chan<- bool) {
+	if !<-podDeleted {
 		fmt.Printf("Pod %s didn't finish deleting before timeout. Cleanup jobs not attempted.\n", request.PodName)
-		finished <- false
+		trySend(finished, false)
 		return
+	} else {
+		fmt.Printf("DELETED POD: %s\n", request.PodName)
 	}
 
+	tempFilesOkay := true
 	err := c.cleanTempFiles(request)
 	if err != nil {
 		fmt.Printf("Couldn't clean directory of temp files for %s: %s\n", request.PodName, err.Error())
+		tempFilesOkay = false
 	}
 
+	storageClean := true
 	// if the user has no other pods, then:
 	if cleanStorage {
-		err = c.cleanUserStorage(request)
+		ch := make(chan bool, 1)
+		err = c.cleanUserStorage(request, ch)
 		if err != nil {
 			fmt.Printf("Couldn't clean user storage for %s after pod deletion: %s\n", request.UserID, err.Error())
 		}
+		// Block until PV and PVC are deleted or timeout
+		storageClean = <-ch
+		if storageClean {
+			fmt.Printf("DELETED PV and PVC: %s\n", getStoragePVName(request.UserID))
+		} else {
+			fmt.Printf("FAILED TO DELETE PV and PVC: %s\n", getStoragePVName(request.UserID))
+		}
 	}
 
-	finished <- true
+	// Once all jobs finish, finished<-true iff all jobs finished successfully
+	finished <- (tempFilesOkay && storageClean)
 }
 
 // Delete a pod and remove user storage if no longer in use,
 // return nil when the delete request was made successfully,
 // push finished<-true when clean up tasks complete successfully
-func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan bool) error {
+func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan<- bool) error {
 	// check whether the pod exists, searching by user if username given
 	podList, err := c.getUserPodList(request.UserID)
 	if err != nil {
@@ -943,8 +1081,6 @@ func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan boo
 			break
 		}
 	}
-	// The index isn't used in the Pods.Delete request, but this serves as a necessary check
-	// that the user and domain tags of the pod match the request.UserID
 	if !foundPod {
 		return errors.New("Pod doesn't exist or isn't owned by given user, cannot be deleted")
 	}
@@ -955,13 +1091,12 @@ func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan boo
 		cleanStorage = true
 	}
 
-	// Start watching the pod to perform cleanup once it's deleted
-	go c.deletePodCleanJobs(request, cleanStorage, finished)
-	// delete it
-	err = c.ClientDeletePod(request.PodName)
+	podDeleted := make(chan bool, 1)
+	err = c.ClientDeletePod(request.PodName, podDeleted)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error: Failed to request pod deletion: %s", err.Error()))
 	}
+	go c.deletePodCleanJobs(request, cleanStorage, podDeleted, finished)
 
 	return nil
 }
@@ -982,6 +1117,7 @@ func (c *clientsetWrapper) serveDeletePod(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		status = http.StatusBadRequest
 		response.PodName = ""
+		fmt.Printf("Error: %s\n", err.Error())
 	} else {
 		status = http.StatusOK
 		response.PodName = request.PodName
@@ -991,7 +1127,14 @@ func (c *clientsetWrapper) serveDeletePod(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
+
+	// close the channel to avoid leaks
+	go func() {
+		<-finished
+		close(finished)
+	}()
 }
+
 // Get the user ID to whom a PVC belongs if it is a valid user storage,
 // otherwise return an empty string
 func getPVCUserID(pvc apiv1.PersistentVolumeClaim) string {
@@ -1005,7 +1148,7 @@ func getPVCUserID(pvc apiv1.PersistentVolumeClaim) string {
 }
 
 // Remove all the unused user storage and tempfiles
-func (c *clientsetWrapper) cleanAllUnused() error {
+func (c *clientsetWrapper) cleanAllUnused(finished chan<- bool) error {
 	podList, err := c.getUserPodList("")
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list all pods: %s\n", err.Error()))
@@ -1026,6 +1169,8 @@ func (c *clientsetWrapper) cleanAllUnused() error {
 		}
 	}
 
+	var allChans []<-chan bool
+
 	// Clean Persistent Volume Claims
 	PVCList, err := c.ClientListPVC(metav1.ListOptions{})
 	for _, pvc := range PVCList.Items {
@@ -1042,10 +1187,12 @@ func (c *clientsetWrapper) cleanAllUnused() error {
 			}
 			// if the owner doesn't have any pods, the PV should be deleted
 			if !inUse {
-				err := c.ClientDeletePVC(pvc.Name)
+				deleted := make(chan bool, 1)
+				err := c.ClientDeletePVC(pvc.Name, deleted)
 				if err != nil {
 					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pvc.Name, err.Error()))
 				}
+				allChans = append(allChans, deleted)
 			}
 		}
 	}
@@ -1066,16 +1213,18 @@ func (c *clientsetWrapper) cleanAllUnused() error {
 			}
 			// if the owner doesn't have any pods, the PV should be deleted
 			if !inUse {
-				err := c.ClientDeletePV(pv.Name)
+				deleted := make(chan bool, 1)
+				err := c.ClientDeletePV(pv.Name, deleted)
 				if err != nil {
 					return errors.New(fmt.Sprintf("Couldn't delete PV %s: %s\n", pv.Name, err.Error()))
 				}
+				allChans = append(allChans, deleted)
 			}
 		}
 	}
 
 	// Clean Temporary Files
-	files, err := ioutil.ReadDir("/tmp/tokens/")
+	files, err := ioutil.ReadDir(getPodTokenDir(""))
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list token directory: %s\n", err.Error()))
 	}
@@ -1089,18 +1238,20 @@ func (c *clientsetWrapper) cleanAllUnused() error {
 			}
 		}
 		if !inUse {
-			err = os.RemoveAll(fmt.Sprintf("/tmp/tokens/%s", filename))
+			err = os.RemoveAll(getPodTokenDir(filename))
 			if err != nil {
 				return errors.New(fmt.Sprintf("Couldn't delete unused files: %s\n", err.Error()))
 			}
 		}
 	}
 
+	go combineBoolChannels(allChans, finished)
 	return nil
 }
 
 func (c *clientsetWrapper) serveCleanAllUnused(w http.ResponseWriter, r *http.Request) {
-	err := c.cleanAllUnused()
+	finished := make(chan bool, 1)
+	err := c.cleanAllUnused(finished)
 	status := http.StatusOK
 	reply := "Success\n"
 	if err != nil {
@@ -1111,6 +1262,10 @@ func (c *clientsetWrapper) serveCleanAllUnused(w http.ResponseWriter, r *http.Re
 	// write the response
 	w.WriteHeader(status)
 	fmt.Fprint(w, reply)
+	go func() {
+		<-finished
+		close(finished)
+	}()
 }
 
 func main() {
