@@ -74,6 +74,15 @@ type DeletePodResponse struct {
 	PodName string `json:"pod_name"`
 }
 
+type DeleteAllPodsRequest struct {
+	UserID string `json:"user_id"`
+	RemoteIP string
+}
+
+type DeleteAllPodsResponse struct {
+	PodNames []string `json:"pod_names"`
+}
+
 type clientsetWrapper struct {
 	clientset *kubernetes.Clientset
 }
@@ -321,7 +330,7 @@ func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
 	for key, value := range existingPod.ObjectMeta.Annotations {
 		// If this key is specified in the manifest to be copied from /tmp/key and shown to the user in the frontend
 		if value == "copyForFrontend" {
-			filename := fmt.Sprintf("/tmp/%s-%s", existingPod.Name, key)
+			filename := fmt.Sprintf("%s/%s", getPodTokenDir(existingPod.Name), key)
 			content, err := ioutil.ReadFile(filename)
 			if err != nil {
 				// If the file is missing, just let the key be absent for the user, but log that it occurred
@@ -443,9 +452,25 @@ func combineBoolChannels(chans []<-chan bool, combined chan<- bool) {
 	combined <- output
 }
 
+// Gets the IP of the source that made the request, either r.RemoteAddr,
+// or if it was forwarded, the first address in the X-Forwarded-For header
+func getRemoteIP(r *http.Request) string {
+	// When running this behind caddy, r.RemoteAddr is just the caddy process's IP addr,
+	// and X-Forward-For header should contain the silo's IP address.
+	// This may be different with ingress.
+	var siloIP string
+	value, forwarded := r.Header["X-Forwarded-For"]
+	if forwarded {
+		siloIP = value[0]
+	} else {
+		siloIP = r.RemoteAddr
+	}
+	return regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(siloIP)
+}
+
 // Set values in the CreatePodRequest not stated in the http request json
 func setAllEnvVars(request *CreatePodRequest, r *http.Request) {
-	remoteIP := regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
+	remoteIP := getRemoteIP(r)
 	request.AllEnvVars = map[string]string{
 		"HOME_SERVER": strings.Replace(remoteIP, sciencedataInternalNet, sciencedataPrivateNet, 1),
 		"SD_UID":      request.UserID,
@@ -887,6 +912,7 @@ func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, podReady <-chan bo
 
 	// Perform start jobs here
 	c.copyAllTokens(pod)
+	// TODO ingress
 
 	trySend(finished, true)
 }
@@ -924,8 +950,6 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
 	}
 	fmt.Printf("CREATED POD: %s\n", createdPod.Name)
-	//TODO getIngress
-	//TODO copyHostkeys (in a nonblocking goroutine)
 	go c.createPodStartJobs(createdPod, userStorageReady, podReady, createPodFinished)
 
 	return createdPod.Name, nil
@@ -968,11 +992,11 @@ func (c *clientsetWrapper) serveCreatePod(w http.ResponseWriter, r *http.Request
 // DELETE POD FUNCTIONS
 
 // Delete lingering PV and PVCs for user storage if they exist
-func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest, finished chan<- bool) error {
-	if request.UserID == "" {
+func (c *clientsetWrapper) cleanUserStorage(userID string, finished chan<- bool) error {
+	if userID == "" {
 		return nil
 	}
-	name := getStoragePVName(request.UserID)
+	name := getStoragePVName(userID)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", name)}
 	PVCfinished := make(chan bool, 1)
 	pvcList, err := c.ClientListPVC(opts)
@@ -1010,35 +1034,69 @@ func (c *clientsetWrapper) cleanUserStorage(request DeletePodRequest, finished c
 
 // Delete all the pods owned by request.UserID
 // Convenience function for testing
-func (c *clientsetWrapper) deleteAllPodsUser(request DeletePodRequest, finished chan<- bool) error {
+func (c *clientsetWrapper) deleteAllPodsUser(request DeleteAllPodsRequest, finished chan<- bool) ([]string, error) {
+	var deleteList []string
 	if request.UserID == "" {
-		return errors.New("Need username of owner of pods to be deleted")
+		return deleteList, errors.New("Need username of owner of pods to be deleted")
 	}
 	podList, err := c.getUserPodList(request.UserID)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't list user's pods: %s", err.Error()))
+		return deleteList, errors.New(fmt.Sprintf("Couldn't list user's pods: %s", err.Error()))
 	}
 	var allChans []<-chan bool
 	for _, pod := range podList.Items {
 		podChan := make(chan bool, 1)
 		err = c.ClientDeletePod(pod.Name, podChan)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
+			return deleteList, errors.New(fmt.Sprintf("Error while deleting pod: %s", err.Error()))
 		}
 		allChans = append(allChans, podChan)
 		err = c.cleanTempFiles(pod.Name)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Error while cleaning pod files: %s", err.Error()))
+			return deleteList, errors.New(fmt.Sprintf("Error while cleaning pod files: %s", err.Error()))
 		}
+		deleteList = append(deleteList, pod.Name)
 	}
 	storageChan := make(chan bool, 1)
-	err = c.cleanUserStorage(request, storageChan)
+	err = c.cleanUserStorage(request.UserID, storageChan)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error while removing user storage: %s", err.Error()))
+		return deleteList, errors.New(fmt.Sprintf("Error while removing user storage: %s", err.Error()))
 	}
 	allChans = append(allChans, storageChan)
 	go combineBoolChannels(allChans, finished)
-	return nil
+	return deleteList, nil
+}
+
+// Calls deleteAllPodsUser with the http request, writes the success/failure http response
+func (c *clientsetWrapper) serveDeleteAllPodsUser(w http.ResponseWriter, r *http.Request) {
+	// Parse the POSTed request JSON and log the request
+	var request DeleteAllPodsRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	request.RemoteIP = getRemoteIP(r)
+	fmt.Printf("deleteAllPodsUser request: %+v\n", request)
+
+	finished := make(chan bool, 1)
+	deleteList, err := c.deleteAllPodsUser(request, finished)
+	var status int
+	var response DeleteAllPodsResponse
+	response.PodNames = deleteList
+	status = http.StatusBadRequest // by default, overwrite if successful
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
+		close(finished)
+	} else {
+		// Then wait for it to finish deleting pods
+		if <-finished {
+			status = http.StatusOK
+		}
+		close(finished)
+	}
+
+	// write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(response)
 }
 
 // Get the user ID to whom a PV belongs if it is a valid user storage,
@@ -1093,7 +1151,7 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanSto
 	// if the user has no other pods, then:
 	if cleanStorage {
 		ch := make(chan bool, 1)
-		err = c.cleanUserStorage(request, ch)
+		err = c.cleanUserStorage(request.UserID, ch)
 		if err != nil {
 			fmt.Printf("Couldn't clean user storage for %s after pod deletion: %s\n", request.UserID, err.Error())
 		}
@@ -1147,10 +1205,10 @@ func (c *clientsetWrapper) serveDeletePod(w http.ResponseWriter, r *http.Request
 	var request DeletePodRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
-	request.RemoteIP = regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(r.RemoteAddr)
+	request.RemoteIP = getRemoteIP(r)
 	fmt.Printf("deletePod request: %+v\n", request)
 
-	finished := make(chan bool)
+	finished := make(chan bool, 1)
 	err := c.deletePod(request, finished)
 	var status int
 	var response DeletePodResponse
@@ -1318,6 +1376,7 @@ func main() {
 	http.HandleFunc("/create_pod", csWrapper.serveCreatePod)
 	http.HandleFunc("/delete_pod", csWrapper.serveDeletePod)
 	http.HandleFunc("/clean_unused", csWrapper.serveCleanAllUnused)
+	http.HandleFunc("/delete_all_user", csWrapper.serveDeleteAllPodsUser)
 	err := http.ListenAndServe(":80", nil)
 	if err != nil {
 		fmt.Printf("Error running server: %s\n", err.Error())

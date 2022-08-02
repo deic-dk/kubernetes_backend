@@ -214,3 +214,20 @@ func TestCreationDeletion(t *testing.T) {
 
 	t.Log("Success, cleaned up created resources")
 }
+
+//func TestTokenCopy(t *testing.T) {
+//	// Test URI token for jupyter
+//	// Test ssh keys for ubuntu
+//  // Test that the dirs are cleaned after deletion
+//}
+
+//func TestAllImages(t *testing.T) {
+//	// Get list of images available in testing repo
+//	// Generate a request for each
+//	// Check that each reaches ready state
+//}
+
+//func TestGetPods(t *testing.T) {
+//	// Create a few pods with different users,
+//	// Double check with a series of requests that only/all owned pods are shown
+//}
