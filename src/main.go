@@ -315,7 +315,16 @@ func getUserID(user string, domain string) string {
 
 func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
 	var podInfo GetPodsResponse
-	var ageSec = time.Now().Sub(existingPod.Status.StartTime.Time).Seconds()
+	var ageSec float64
+	var startTimeStr string
+	// existingPod.Status.StartTime might not exist yet. Check to avoid panic
+	startTime := existingPod.Status.StartTime
+	if startTime == nil {
+		ageSec = 0
+	} else {
+		ageSec = time.Now().Sub(startTime.Time).Seconds()
+		startTimeStr = existingPod.Status.StartTime.Format("2006-01-02T15:04:05Z")
+	}
 	podInfo.Age = fmt.Sprintf("%d:%d:%d", int32(ageSec/3600), int32(ageSec/60)%60, int32(ageSec)%60)
 	podInfo.ContainerName = existingPod.Spec.Containers[0].Name
 	podInfo.ImageName = existingPod.Spec.Containers[0].Image
@@ -323,7 +332,7 @@ func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
 	podInfo.Owner = getUserID(existingPod.ObjectMeta.Labels["user"], existingPod.ObjectMeta.Labels["domain"])
 	podInfo.PodIP = existingPod.Status.PodIP
 	podInfo.PodName = existingPod.Name
-	podInfo.Status = fmt.Sprintf("%s:%s", existingPod.Status.Phase, existingPod.Status.StartTime.Format("2006-01-02T15:04:05Z"))
+	podInfo.Status = fmt.Sprintf("%s:%s", existingPod.Status.Phase, startTimeStr)
 
 	// Initialize the tokens map so it can be written into in the following block
 	podInfo.Tokens = make(map[string]string)
@@ -334,7 +343,7 @@ func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
 			content, err := ioutil.ReadFile(filename)
 			if err != nil {
 				// If the file is missing, just let the key be absent for the user, but log that it occurred
-				fmt.Printf("Error copying tokens from file %s: %s\n", filename, err.Error())
+				fmt.Printf("Couldn't copy tokens (maybe not ready yet) from file %s: %s\n", filename, err.Error())
 				continue
 			}
 			podInfo.Tokens[key] = string(content)
