@@ -902,6 +902,8 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 			fmt.Printf("Couldn't create dir to copy tokens for %s: %s\n", pod.Name, err.Error())
 			return
 		}
+	} else {
+		return
 	}
 	for _, key := range toCopy {
 		err := c.copyToken(key, pod)
@@ -1375,19 +1377,36 @@ func (c *clientsetWrapper) serveCleanAllUnused(w http.ResponseWriter, r *http.Re
 	}()
 }
 
+// For each pod already running in the namespace, call copyAllTokens.
+// Useful in case the service restarts
+func (c *clientsetWrapper) copyTokensExistingPods() error {
+	podList, err := c.ClientListPods(metav1.ListOptions{})
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list pods: %s", err))
+	}
+	for _, pod := range podList.Items {
+		c.copyAllTokens(&pod)
+	}
+	return nil
+}
+
 func main() {
 	csWrapper := clientsetWrapper{
 		clientset: getClientset(),
 	}
-	// By writing serveGetPods etc as methods on a clientsetWrapper, the clientset can
-	// be created in main() and accessed inside the http.HandleFuncs without passing another argument
+	err := csWrapper.copyTokensExistingPods()
+	if err != nil {
+		panic(fmt.Sprintf("Error: %s", err.Error()))
+	}
+
 	http.HandleFunc("/get_pods", csWrapper.serveGetPods)
 	http.HandleFunc("/create_pod", csWrapper.serveCreatePod)
 	http.HandleFunc("/delete_pod", csWrapper.serveDeletePod)
 	http.HandleFunc("/clean_unused", csWrapper.serveCleanAllUnused)
 	http.HandleFunc("/delete_all_user", csWrapper.serveDeleteAllPodsUser)
-	err := http.ListenAndServe(":80", nil)
+
+	err = http.ListenAndServe(":80", nil)
 	if err != nil {
-		fmt.Printf("Error running server: %s\n", err.Error())
+		panic(fmt.Sprintf("Error running server: %s\n", err.Error()))
 	}
 }
