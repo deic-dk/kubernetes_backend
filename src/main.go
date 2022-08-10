@@ -23,10 +23,13 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // TODO figure out how to get the namespace automatically from within the pod where this runs
 const namespace = "sciencedata-dev"
+// TODO figure out how to get node IPs automatically
+const localNodeIP = "130.226.137.130"
 const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-dk\\/pod_manifests"
 const sciencedataPrivateNet = "10.2."
 const sciencedataInternalNet = "10.0."
@@ -290,6 +293,18 @@ func (c *clientsetWrapper) ClientCreatePV(target *apiv1.PersistentVolume, ready 
 	return c.clientset.CoreV1().PersistentVolumes().Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
+func (c *clientsetWrapper) ClientListServices(opt metav1.ListOptions) (*apiv1.ServiceList, error) {
+	return c.clientset.CoreV1().Services(namespace).List(context.TODO(), opt)
+}
+
+func (c *clientsetWrapper) ClientCreateService(target *apiv1.Service) (*apiv1.Service, error) {
+	return c.clientset.CoreV1().Services(namespace).Create(context.TODO(), target, metav1.CreateOptions{})
+}
+
+func (c *clientsetWrapper) ClientDeleteService(name string) error {
+	return c.clientset.CoreV1().Services(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
 // GET PODS FUNCTIONS
 
 // Wrapper for ClientListPods that selects labels for the given username,
@@ -530,11 +545,6 @@ func getYaml(url string) (string, error) {
 
 // Fill in the pod's environment variables from the settings in the CreatePodRequest
 func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
-	user, domain, _ := strings.Cut(request.UserID, "@")
-	pod.ObjectMeta.Labels = map[string]string{
-		"user":   user,
-		"domain": domain,
-	}
 	for i, container := range pod.Spec.Containers {
 		envVars, exist := request.ContainerEnvVars[container.Name]
 		// if there are settings for this container (if container.Name is a key in request.ContainerEnvVars)
@@ -572,8 +582,8 @@ func applyCreatePodRequestSettings(request CreatePodRequest, pod *apiv1.Pod) {
 
 // Attempt to find a unique name for the pod. If successful, set it in the apiv1.Pod
 func (c *clientsetWrapper) applyCreatePodName(request CreatePodRequest, targetPod *apiv1.Pod) error {
-	basePodName := fmt.Sprintf("%s-%s", targetPod.Name, getUserString(request.UserID))
 	user, domain, _ := strings.Cut(request.UserID, "@")
+	basePodName := fmt.Sprintf("%s-%s", targetPod.Name, getUserString(request.UserID))
 	existingPods, err := c.ClientListPods(metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("user=%s,domain=%s", user, domain),
 	})
@@ -592,8 +602,13 @@ func (c *clientsetWrapper) applyCreatePodName(request CreatePodRequest, targetPo
 		}
 		// if a pod with the name podName doesn't exist yet
 		if !exists {
-			// then set the target pod's name and finish
+			// then set the target pod's name and labels, then finish
 			targetPod.Name = podName
+			targetPod.ObjectMeta.Labels = map[string]string{
+				"user":   user,
+				"domain": domain,
+				"podName": podName,
+			}
 			return nil
 		}
 		// otherwise try again with the next name
@@ -696,6 +711,50 @@ func (c *clientsetWrapper) getTargetPod(request CreatePodRequest) (apiv1.Pod, er
 	}
 
 	return targetPod, nil
+}
+
+func getPodSshService(pod *apiv1.Pod) *apiv1.Service {
+	return &apiv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-ssh", pod.Name),
+		},
+		Spec: apiv1.ServiceSpec{
+			Ports: []apiv1.ServicePort{
+				{
+					Name: "ssh",
+					Protocol: apiv1.ProtocolTCP,
+					Port: 22,
+					TargetPort: intstr.FromInt(22),
+				},
+			},
+			Type: apiv1.ServiceTypeLoadBalancer,
+			Selector: pod.ObjectMeta.Labels,
+			ExternalIPs: []string{localNodeIP},
+		},
+	}
+}
+
+func (c *clientsetWrapper) startSshService(pod *apiv1.Pod) error {
+	needsSsh := false
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			if port.ContainerPort == 22 {
+				needsSsh = true
+				break
+			}
+		}
+	}
+
+	if needsSsh {
+		service := getPodSshService(pod)
+		fmt.Printf("Starting service %s\n", service.ObjectMeta.Name)
+		_, err := c.ClientCreateService(service)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Generate an api object for the PV to attempt to create for the user's /tank/storage
@@ -923,6 +982,8 @@ func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, podReady <-chan bo
 
 	// Perform start jobs here
 	c.copyAllTokens(pod)
+	c.startSshService(pod)
+
 	// TODO ingress
 
 	trySend(finished, true)
@@ -1380,6 +1441,11 @@ func (c *clientsetWrapper) serveCleanAllUnused(w http.ResponseWriter, r *http.Re
 // For each pod already running in the namespace, call copyAllTokens.
 // Useful in case the service restarts
 func (c *clientsetWrapper) copyTokensExistingPods() error {
+	// TODO this is very slow if there are problems copying the keys,
+	// and perhaps also if there are many pods
+
+	// Should only copy for those that have expected keys which don't exist,
+	// should have a short timeout,
 	podList, err := c.ClientListPods(metav1.ListOptions{})
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list pods: %s", err))
@@ -1409,4 +1475,5 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Error running server: %s\n", err.Error()))
 	}
+	fmt.Printf("Listening\n")
 }
