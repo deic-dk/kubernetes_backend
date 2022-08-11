@@ -18,23 +18,24 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // TODO figure out how to get the namespace automatically from within the pod where this runs
 const namespace = "sciencedata-dev"
+
 // TODO figure out how to get node IPs automatically
 const localNodeIP = "130.226.137.130"
 const whitelistYamlURLRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-dk\\/pod_manifests"
 const sciencedataPrivateNet = "10.2."
 const sciencedataInternalNet = "10.0."
 const timeoutCreate = 30 * time.Second
-const timeoutDelete = 30 * time.Second
+const timeoutDelete = 90 * time.Second
 
 type GetPodsRequest struct {
 	UserID string `json:"user_id"`
@@ -78,7 +79,7 @@ type DeletePodResponse struct {
 }
 
 type DeleteAllPodsRequest struct {
-	UserID string `json:"user_id"`
+	UserID   string `json:"user_id"`
 	RemoteIP string
 }
 
@@ -126,6 +127,8 @@ func (c *clientsetWrapper) watchFor(
 		watcher, err = c.clientset.CoreV1().PersistentVolumes().Watch(context.TODO(), listOptions)
 	case "PVC":
 		watcher, err = c.clientset.CoreV1().PersistentVolumeClaims(namespace).Watch(context.TODO(), listOptions)
+	case "SVC":
+		watcher, err = c.clientset.CoreV1().Services(namespace).Watch(context.TODO(), listOptions)
 	default:
 		err = errors.New("Unsupported resource type for watcher")
 	}
@@ -194,6 +197,8 @@ func announceDeleted(obj runtime.Object) {
 		kindStr = "PV"
 	case "*v1.PersistentVolumeClaim":
 		kindStr = "PVC"
+	case "*v1.Service":
+		kindStr = "SVC"
 	default:
 		kindStr = "?"
 		fmt.Printf("Unknown typestr: %s\n", typeStr)
@@ -301,7 +306,8 @@ func (c *clientsetWrapper) ClientCreateService(target *apiv1.Service) (*apiv1.Se
 	return c.clientset.CoreV1().Services(namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
-func (c *clientsetWrapper) ClientDeleteService(name string) error {
+func (c *clientsetWrapper) ClientDeleteService(name string, finished chan<- bool) error {
+	go c.watchFor(name, timeoutDelete, "SVC", signalDeleted, finished)
 	return c.clientset.CoreV1().Services(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
@@ -605,8 +611,8 @@ func (c *clientsetWrapper) applyCreatePodName(request CreatePodRequest, targetPo
 			// then set the target pod's name and labels, then finish
 			targetPod.Name = podName
 			targetPod.ObjectMeta.Labels = map[string]string{
-				"user":   user,
-				"domain": domain,
+				"user":    user,
+				"domain":  domain,
 				"podName": podName,
 			}
 			return nil
@@ -717,43 +723,47 @@ func getPodSshService(pod *apiv1.Pod) *apiv1.Service {
 	return &apiv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s-ssh", pod.Name),
+			Labels: map[string]string{
+				"createdForPod": pod.Name,
+			},
 		},
 		Spec: apiv1.ServiceSpec{
 			Ports: []apiv1.ServicePort{
 				{
-					Name: "ssh",
-					Protocol: apiv1.ProtocolTCP,
-					Port: 22,
+					Name:       "ssh",
+					Protocol:   apiv1.ProtocolTCP,
+					Port:       22,
 					TargetPort: intstr.FromInt(22),
 				},
 			},
-			Type: apiv1.ServiceTypeLoadBalancer,
-			Selector: pod.ObjectMeta.Labels,
+			Type:        apiv1.ServiceTypeLoadBalancer,
+			Selector:    pod.ObjectMeta.Labels,
 			ExternalIPs: []string{localNodeIP},
 		},
 	}
 }
 
-func (c *clientsetWrapper) startSshService(pod *apiv1.Pod) error {
-	needsSsh := false
+func needsSshService(pod *apiv1.Pod) bool {
+	listensSsh := false
 	for _, container := range pod.Spec.Containers {
 		for _, port := range container.Ports {
 			if port.ContainerPort == 22 {
-				needsSsh = true
+				listensSsh = true
 				break
 			}
 		}
 	}
+	return listensSsh
+}
 
-	if needsSsh {
-		service := getPodSshService(pod)
-		fmt.Printf("Starting service %s\n", service.ObjectMeta.Name)
-		_, err := c.ClientCreateService(service)
-		if err != nil {
-			return err
-		}
+func (c *clientsetWrapper) startSshService(pod *apiv1.Pod) error {
+	service := getPodSshService(pod)
+	_, err := c.ClientCreateService(service)
+	if err != nil {
+		return err
 	}
 
+	fmt.Printf("CREATED SVC: %s\n", service.ObjectMeta.Name)
 	return nil
 }
 
@@ -973,16 +983,17 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 }
 
 // Perform tasks that should be done for each created pod
-func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, podReady <-chan bool, storageReady <-chan bool, finished chan<- bool) {
-	if !(<-podReady && <-storageReady) {
-		fmt.Printf("Pod %s and/or user storage didn't reach ready state. Start jobs not attempted.\n", pod.Name)
+func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, readyToStartJobs []<-chan bool, finished chan<- bool) {
+	ready := make(chan bool, 1)
+	combineBoolChannels(readyToStartJobs, ready)
+	if !(<-ready) {
+		fmt.Printf("Pod %s, related services, and/or user storage didn't reach ready state. Start jobs not attempted.\n", pod.Name)
 		trySend(finished, false)
 		return
 	}
 
 	// Perform start jobs here
 	c.copyAllTokens(pod)
-	c.startSshService(pod)
 
 	// TODO ingress
 
@@ -995,8 +1006,18 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 	// generate the pod api object to attempt to create
 	targetPod, err := c.getTargetPod(request)
 	if err != nil {
+		createPodFinished<- false
 		return "", errors.New(fmt.Sprintf("Invalid targetPod: %s\n", err.Error()))
 	}
+
+  // make the channels to track when the necessary objects are ready
+	allObjectsReady := make([]<-chan bool, 2)
+	userStorageReady := make(chan bool, 1)
+	allObjectsReady[0] = userStorageReady
+	podReady := make(chan bool, 1)
+	allObjectsReady[1] = podReady
+	// note services are not tracked because apiv1.Service.Status doesn't change once ready;
+	// services should work correctly if created without error
 
 	// if the pod requires a PV and PVC for the user, check that those exist, create if not
 	hasUserStorage := false
@@ -1005,10 +1026,10 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 			hasUserStorage = true
 		}
 	}
-	userStorageReady := make(chan bool, 1)
 	if hasUserStorage {
 		err = c.ensureUserStorageExists(request, userStorageReady)
 		if err != nil {
+			createPodFinished<- false
 			return "", errors.New(fmt.Sprintf("Couldn't ensure user storage exists: %s", err.Error()))
 		}
 	} else {
@@ -1016,13 +1037,23 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 	}
 
 	// create the pod
-	podReady := make(chan bool, 1)
 	createdPod, err := c.ClientCreatePod(&targetPod, podReady)
 	if err != nil {
+		createPodFinished<- false
 		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
 	}
 	fmt.Printf("CREATED POD: %s\n", createdPod.Name)
-	go c.createPodStartJobs(createdPod, userStorageReady, podReady, createPodFinished)
+
+	// create the ssh service if necessary
+	if needsSshService(&targetPod) {
+		err = c.startSshService(&targetPod)
+		if err != nil {
+			createPodFinished<- false
+			return "", errors.New(fmt.Sprintf("Error while creating service: %s", err.Error()))
+		}
+	}
+
+	go c.createPodStartJobs(createdPod, allObjectsReady, createPodFinished)
 
 	return createdPod.Name, nil
 }
@@ -1056,7 +1087,18 @@ func (c *clientsetWrapper) serveCreatePod(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(response)
 
 	go func() {
-		<-finished
+		success := <-finished
+		// if createPod returned without error, but not all objects reached desired state,
+		if (err != nil) && (!success) {
+			deleteRequest := DeletePodRequest{
+				UserID: request.UserID,
+				PodName: podName,
+				RemoteIP: request.RemoteIP,
+			}
+			fmt.Printf("Didn't successfully create all kubernetes objects for pod %s, calling deletion", podName)
+			deleteChannel := make(chan bool, 1)
+			c.deletePod(deleteRequest, deleteChannel)
+		}
 		close(finished)
 	}()
 }
@@ -1205,6 +1247,35 @@ func (c *clientsetWrapper) cleanTempFiles(podName string) error {
 	return nil
 }
 
+func (c *clientsetWrapper) cleanPodServices(podName string, servicesCleaned chan<- bool) error {
+	listOptions := metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("createdForPod=%s", podName),
+	}
+	serviceList, err := c.ClientListServices(listOptions)
+	if err != nil {
+		return err
+	}
+
+	errorStr := ""
+	chanAllServices := make([]<-chan bool, len(serviceList.Items))
+	for i, service := range serviceList.Items {
+		ch := make(chan bool, 1)
+		chanAllServices[i] = ch
+		err = c.ClientDeleteService(service.Name, ch)
+		if err != nil {
+			ch <- false
+			errorStr = errorStr + err.Error() + "\n"
+		}
+	}
+	go combineBoolChannels(chanAllServices, servicesCleaned)
+
+	if errorStr != "" {
+		return errors.New(fmt.Sprintf("Errors while deleting services: [\n %s]\n", errorStr))
+	}
+
+	return nil
+}
+
 func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanStorage bool, podDeleted <-chan bool, finished chan<- bool) {
 	if !<-podDeleted {
 		fmt.Printf("Pod %s didn't finish deleting before timeout. Cleanup jobs not attempted.\n", request.PodName)
@@ -1217,6 +1288,13 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanSto
 	if err != nil {
 		fmt.Printf("Couldn't clean directory of temp files for %s: %s\n", request.PodName, err.Error())
 		tempFilesOkay = false
+	}
+
+	chanServicesOkay := make(chan bool, 1)
+	err = c.cleanPodServices(request.PodName, chanServicesOkay)
+	if err != nil {
+		fmt.Printf("Error while cleaning services: %s\n", err.Error())
+		chanServicesOkay <- false
 	}
 
 	storageClean := true
@@ -1232,7 +1310,7 @@ func (c *clientsetWrapper) deletePodCleanJobs(request DeletePodRequest, cleanSto
 	}
 
 	// Once all jobs finish, finished<-true iff all jobs finished successfully
-	finished <- (tempFilesOkay && storageClean)
+	finished <- (tempFilesOkay && storageClean && (<-chanServicesOkay))
 }
 
 // Delete a pod and remove user storage if no longer in use,
@@ -1471,9 +1549,9 @@ func main() {
 	http.HandleFunc("/clean_unused", csWrapper.serveCleanAllUnused)
 	http.HandleFunc("/delete_all_user", csWrapper.serveDeleteAllPodsUser)
 
+	fmt.Printf("Listening\n")
 	err = http.ListenAndServe(":80", nil)
 	if err != nil {
 		panic(fmt.Sprintf("Error running server: %s\n", err.Error()))
 	}
-	fmt.Printf("Listening\n")
 }
