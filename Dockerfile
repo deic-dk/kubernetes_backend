@@ -39,7 +39,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y golang && \
     echo 'export PATH="$PATH:/root/go/bin"' >> /root/.bashrc && \
     go install github.com/go-delve/delve/cmd/dlv@latest
 
-RUN mkdir /tmp/tokens
+RUN mkdir /tmp/tokens && mkdir /tmp/k8spodinfo
 
 ADD ["src", "/root/go/src/user_pods_k8s_backend/src"]
 

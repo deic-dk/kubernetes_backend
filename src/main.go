@@ -54,6 +54,7 @@ type GetPodsResponse struct {
 	Url           string            `json:"url"`
 	SshUrl        string            `json:"ssh_url"`
 	Tokens        map[string]string `json:"tokens"`
+	K8sPodInfo    map[string]string `json:"k8s_pod_info"`
 }
 
 type CreatePodRequest struct {
@@ -335,6 +336,30 @@ func getUserID(user string, domain string) string {
 	return user
 }
 
+func fillK8sPodInfo(pod apiv1.Pod) (map[string]string, error) {
+	k8sPodInfo := make(map[string]string)
+	dirName := getK8sPodInfoDir(pod.Name)
+	fileList, err := ioutil.ReadDir(dirName)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// if the directory doesn't exist, stop here
+			return k8sPodInfo, nil
+		} else {
+			// if there's some problem other than the directory not existing, log it
+			return k8sPodInfo, err
+		}
+	}
+	for _, file := range fileList {
+		fileName := file.Name()
+		content, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", dirName, fileName))
+		if err != nil {
+			return k8sPodInfo, err
+		}
+		k8sPodInfo[fileName] = string(content)
+	}
+	return k8sPodInfo, nil
+}
+
 func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
 	var podInfo GetPodsResponse
 	var ageSec float64
@@ -372,8 +397,13 @@ func fillPodResponse(existingPod apiv1.Pod) GetPodsResponse {
 		}
 	}
 
+	k8sPodInfo, err := fillK8sPodInfo(existingPod)
+	if err != nil {
+		fmt.Printf("Couldn't copy k8s pod info for pod %s: %s\n", existingPod.Name, err.Error())
+	}
+	podInfo.K8sPodInfo = k8sPodInfo
+
 	// TODO get url from ingress
-	// TODO get ssh_url from service if exists
 	return podInfo
 }
 
@@ -948,6 +978,29 @@ func (c *clientsetWrapper) copyToken(key string, pod *apiv1.Pod) error {
 	return errors.New(fmt.Sprintf("Timeout while trying to copy %s: %s", filename, stderr.String()))
 }
 
+func makeCleanDirectory(dirName string) error {
+	// Check to see if the directory exists
+	_, err := os.Stat(dirName)
+	if err != nil {
+		// If there's an error in stat for a reason other than that the directory doesn't exist,
+		if !os.IsNotExist(err) {
+			return errors.New(fmt.Sprintf("Couldn't stat directory %s: %s", dirName, err.Error()))
+		}
+	} else {
+		// Then the directory exists and needs to be cleaned before being recreated
+		err = os.RemoveAll(dirName)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Couldn't remove old directory %s: %s", dirName, err.Error()))
+		}
+	}
+	// Now the directory will be created
+	err = os.Mkdir(dirName, 0700)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't create directory %s: %s", dirName, err.Error()))
+	}
+	return nil
+}
+
 func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 	var toCopy []string
 	for key, value := range pod.ObjectMeta.Annotations {
@@ -956,27 +1009,9 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 		}
 	}
 	if len(toCopy) > 0 {
-		dirName := getPodTokenDir(pod.Name)
-		// Check to see if the token directory exists
-		_, err := os.Stat(dirName)
+		err := makeCleanDirectory(getPodTokenDir(pod.Name))
 		if err != nil {
-			// If there's an error in stat for a reason other than that the directory doesn't exist,
-			if !os.IsNotExist(err) {
-				fmt.Printf("Couldn't stat directory for copied tokens for %s: %s\n", pod.Name, err.Error())
-				return
-			}
-		} else {
-			// Then the directory exists and needs to be cleaned before being recreated
-			err = os.RemoveAll(dirName)
-			if err != nil {
-				fmt.Printf("Couldn't remove old token directory for %s: %s\n", pod.Name, err.Error())
-				return
-			}
-		}
-		// Now the token directory will be created
-		err = os.Mkdir(dirName, 0700)
-		if err != nil {
-			fmt.Printf("Couldn't create dir to copy tokens for %s: %s\n", pod.Name, err.Error())
+			fmt.Printf("Error making clean token directory for pod %s, did not copy tokens: %s\n", pod.Name, err.Error())
 			return
 		}
 	} else {
@@ -985,7 +1020,66 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 	for _, key := range toCopy {
 		err := c.copyToken(key, pod)
 		if err != nil {
-			fmt.Printf("Error while copying key: %s", err.Error())
+			fmt.Printf("Error while copying token %s for pod %s: %s\n", key, pod.Name, err.Error())
+		}
+	}
+}
+
+// Copies the port of the associated ssh service for the pod
+func (c *clientsetWrapper) copySshPort(pod *apiv1.Pod) error {
+	var sshPort int32 = 0
+	filename := fmt.Sprintf("%s/sshPort", getK8sPodInfoDir(pod.Name))
+	listOptions := metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("createdForPod=%s", pod.Name),
+	}
+	serviceList, err := c.ClientListServices(listOptions)
+	if err != nil {
+		return err
+	}
+	// List through all the services created for this pod
+	for _, service := range serviceList.Items {
+		// Find the one created for ssh
+		if service.Name == fmt.Sprintf("%s-ssh", pod.Name) {
+			for _, portEntry := range service.Spec.Ports {
+				// Find the port object that points to 22 in the pod
+				if portEntry.TargetPort == intstr.FromInt(22) {
+					// The node port is what the client should try to connect to
+					sshPort = portEntry.NodePort
+					break
+				}
+			}
+			break
+		}
+	}
+	if sshPort == 0 {
+		return errors.New("Ssh service nodePort not found")
+	}
+	err = ioutil.WriteFile(filename, []byte(fmt.Sprintf("%d", sshPort)), 0600)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *clientsetWrapper) copyAllK8sPodInfo(pod *apiv1.Pod) {
+	hasSsh := needsSshService(pod)
+	// if any of k8s pod info should be copied (currently only sshPort is used), then make the directory
+	if hasSsh {
+		err := makeCleanDirectory(getK8sPodInfoDir(pod.Name))
+		if err != nil {
+			fmt.Printf("Error creating K8sPodInfo directory for pod %s: %s\n", pod.Name, err.Error())
+			return
+		}
+	} else {
+		return
+	}
+
+	// Then for each key to be copied, call its function
+	if hasSsh {
+		err := c.copySshPort(pod)
+		if err != nil {
+			fmt.Printf("Error while copying ssh port for pod %s: %s\n", pod.Name, err.Error())
 		}
 	}
 }
@@ -1002,6 +1096,7 @@ func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, readyToStartJobs [
 
 	// Perform start jobs here
 	c.copyAllTokens(pod)
+	c.copyAllK8sPodInfo(pod)
 
 	// TODO ingress
 
@@ -1235,6 +1330,10 @@ func getPVUserID(pv apiv1.PersistentVolume) string {
 
 func getPodTokenDir(podName string) string {
 	return fmt.Sprintf("/tmp/tokens/%s", podName)
+}
+
+func getK8sPodInfoDir(podName string) string {
+	return fmt.Sprintf("/tmp/k8spodinfo/%s", podName)
 }
 
 func (c *clientsetWrapper) cleanTempFiles(podName string) error {
