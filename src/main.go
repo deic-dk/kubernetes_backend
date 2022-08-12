@@ -36,6 +36,7 @@ const sciencedataPrivateNet = "10.2."
 const sciencedataInternalNet = "10.0."
 const timeoutCreate = 30 * time.Second
 const timeoutDelete = 90 * time.Second
+const tokenByteLimit = 4096
 
 type GetPodsRequest struct {
 	UserID string `json:"user_id"`
@@ -929,8 +930,15 @@ func (c *clientsetWrapper) copyToken(key string, pod *apiv1.Pod) error {
 			time.Sleep(2 * time.Second)
 			continue
 		} else {
-			// Limit output size to... 4kB?
-			err = ioutil.WriteFile(filename, stdout.Bytes(), 0600)
+			// read the first tokenByteLimit bytes from the buffer, and write it to the file
+			var readBytes []byte
+			if stdout.Len() < tokenByteLimit {
+				readBytes = stdout.Bytes()
+			} else {
+				readBytes = make([]byte, tokenByteLimit)
+				stdout.Read(readBytes)
+			}
+			err = ioutil.WriteFile(filename, readBytes, 0600)
 			if err != nil {
 				return errors.New(fmt.Sprintf("Couldn't write file %s: %s", filename, err.Error()))
 			}
@@ -1006,11 +1014,11 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 	// generate the pod api object to attempt to create
 	targetPod, err := c.getTargetPod(request)
 	if err != nil {
-		createPodFinished<- false
+		createPodFinished <- false
 		return "", errors.New(fmt.Sprintf("Invalid targetPod: %s\n", err.Error()))
 	}
 
-  // make the channels to track when the necessary objects are ready
+	// make the channels to track when the necessary objects are ready
 	allObjectsReady := make([]<-chan bool, 2)
 	userStorageReady := make(chan bool, 1)
 	allObjectsReady[0] = userStorageReady
@@ -1029,7 +1037,7 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 	if hasUserStorage {
 		err = c.ensureUserStorageExists(request, userStorageReady)
 		if err != nil {
-			createPodFinished<- false
+			createPodFinished <- false
 			return "", errors.New(fmt.Sprintf("Couldn't ensure user storage exists: %s", err.Error()))
 		}
 	} else {
@@ -1039,7 +1047,7 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 	// create the pod
 	createdPod, err := c.ClientCreatePod(&targetPod, podReady)
 	if err != nil {
-		createPodFinished<- false
+		createPodFinished <- false
 		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
 	}
 	fmt.Printf("CREATED POD: %s\n", createdPod.Name)
@@ -1048,7 +1056,7 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 	if needsSshService(&targetPod) {
 		err = c.startSshService(&targetPod)
 		if err != nil {
-			createPodFinished<- false
+			createPodFinished <- false
 			return "", errors.New(fmt.Sprintf("Error while creating service: %s", err.Error()))
 		}
 	}
@@ -1091,8 +1099,8 @@ func (c *clientsetWrapper) serveCreatePod(w http.ResponseWriter, r *http.Request
 		// if createPod returned without error, but not all objects reached desired state,
 		if (err != nil) && (!success) {
 			deleteRequest := DeletePodRequest{
-				UserID: request.UserID,
-				PodName: podName,
+				UserID:   request.UserID,
+				PodName:  podName,
 				RemoteIP: request.RemoteIP,
 			}
 			fmt.Printf("Didn't successfully create all kubernetes objects for pod %s, calling deletion", podName)
@@ -1320,6 +1328,7 @@ func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan<- b
 	// check whether the pod exists, searching by user if username given
 	podList, err := c.getUserPodList(request.UserID)
 	if err != nil {
+		finished <- false
 		return errors.New(fmt.Sprintf("Error: Couldn't list pods to check for deletion: %s", err.Error()))
 	}
 	foundPod := false
@@ -1330,6 +1339,7 @@ func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan<- b
 		}
 	}
 	if !foundPod {
+		finished <- false
 		return errors.New("Pod doesn't exist or isn't owned by given user, cannot be deleted")
 	}
 
@@ -1342,6 +1352,7 @@ func (c *clientsetWrapper) deletePod(request DeletePodRequest, finished chan<- b
 	podDeleted := make(chan bool, 1)
 	err = c.ClientDeletePod(request.PodName, podDeleted)
 	if err != nil {
+		finished <- false
 		return errors.New(fmt.Sprintf("Error: Failed to request deletion of Pod: %s", err.Error()))
 	}
 	go c.deletePodCleanJobs(request, cleanStorage, podDeleted, finished)

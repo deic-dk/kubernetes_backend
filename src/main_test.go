@@ -231,3 +231,13 @@ func TestCreationDeletion(t *testing.T) {
 //	// Create a few pods with different users,
 //	// Double check with a series of requests that only/all owned pods are shown
 //}
+
+//func TestFailedCreate(t *testing.T) {
+//	// Make an image that will fail to reach ready state,
+//	// ensure that related services are deleted
+//}
+
+//func TestLongKeyLength(t *testing.T) {
+//	// Make an image with a token longer than the limit,
+//	// ensure that only the maximum number of bytes is copied
+//}
