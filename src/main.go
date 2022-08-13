@@ -949,33 +949,31 @@ func (c *clientsetWrapper) podExec(command []string, pod *apiv1.Pod) (bytes.Buff
 	return stdout, stderr, nil
 }
 
-// Try up to 5 times to copy /tmp/"key" in the created pod into /tmp
+// Try to copy /tmp/"key" in the created pod into /tmp
 func (c *clientsetWrapper) copyToken(key string, pod *apiv1.Pod) error {
 	filename := fmt.Sprintf("%s/%s", getPodTokenDir(pod.Name), key)
 	var stdout, stderr bytes.Buffer
 	var err error
-	for i := 0; i < 5; i++ {
-		stdout, stderr, err = c.podExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, pod)
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		} else {
-			// read the first tokenByteLimit bytes from the buffer, and write it to the file
-			var readBytes []byte
-			if stdout.Len() < tokenByteLimit {
-				readBytes = stdout.Bytes()
-			} else {
-				readBytes = make([]byte, tokenByteLimit)
-				stdout.Read(readBytes)
-			}
-			err = ioutil.WriteFile(filename, readBytes, 0600)
-			if err != nil {
-				return errors.New(fmt.Sprintf("Couldn't write file %s: %s", filename, err.Error()))
-			}
-			return nil
-		}
+	stdout, stderr, err = c.podExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, pod)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't call pod exec for pod %s: %s", pod.Name, err.Error()))
 	}
-	return errors.New(fmt.Sprintf("Timeout while trying to copy %s: %s", filename, stderr.String()))
+	if stdout.Len() == 0 {
+		return errors.New(fmt.Sprintf("Empty response. Stderr: %s", stderr.String()))
+	}
+	// read the first tokenByteLimit bytes from the buffer, and write it to the file
+	var readBytes []byte
+	if stdout.Len() < tokenByteLimit {
+		readBytes = stdout.Bytes()
+	} else {
+		readBytes = make([]byte, tokenByteLimit)
+		stdout.Read(readBytes)
+	}
+	err = ioutil.WriteFile(filename, readBytes, 0600)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't write file %s: %s", filename, err.Error()))
+	}
+	return nil
 }
 
 func makeCleanDirectory(dirName string) error {
@@ -1001,7 +999,11 @@ func makeCleanDirectory(dirName string) error {
 	return nil
 }
 
-func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
+// for each pod.metadata.annotations[key]=="copyForFrontend",
+// copy the token from the pod held in /tmp/key to the filesystem, ready to be served by getPods.
+// If reload is true, it will only attempt each token once,
+// otherwise, it will try a few times to give the pod time to create /tmp/key after starting
+func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod, reload bool) {
 	var toCopy []string
 	for key, value := range pod.ObjectMeta.Annotations {
 		if value == "copyForFrontend" {
@@ -1018,9 +1020,28 @@ func (c *clientsetWrapper) copyAllTokens(pod *apiv1.Pod) {
 		return
 	}
 	for _, key := range toCopy {
-		err := c.copyToken(key, pod)
-		if err != nil {
-			fmt.Printf("Error while copying token %s for pod %s: %s\n", key, pod.Name, err.Error())
+		var err error
+		if reload {
+			// if reloading tokens of pods that should already have created /tmp/key
+			err = c.copyToken(key, pod)
+			if err != nil {
+				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, pod.Name, err.Error())
+			}
+		} else {
+			// give a new pod up to 10s to create /tmp/key before giving up
+			for i := 0; i < 5; i++ {
+				err = c.copyToken(key, pod)
+				if err != nil {
+					time.Sleep(2 * time.Second)
+					continue
+				} else {
+					break
+				}
+			}
+			// if it never succeeded, log the last error message
+			if err != nil {
+				fmt.Printf("Error while copying token %s for pod %s: %s\n", key, pod.Name, err.Error())
+			}
 		}
 	}
 }
@@ -1095,7 +1116,7 @@ func (c *clientsetWrapper) createPodStartJobs(pod *apiv1.Pod, readyToStartJobs [
 	}
 
 	// Perform start jobs here
-	c.copyAllTokens(pod)
+	c.copyAllTokens(pod, false)
 	c.copyAllK8sPodInfo(pod)
 
 	// TODO ingress
@@ -1626,20 +1647,19 @@ func (c *clientsetWrapper) serveCleanAllUnused(w http.ResponseWriter, r *http.Re
 	}()
 }
 
-// For each pod already running in the namespace, call copyAllTokens.
-// Useful in case the service restarts
-func (c *clientsetWrapper) copyTokensExistingPods() error {
-	// TODO this is very slow if there are problems copying the keys,
-	// and perhaps also if there are many pods
-
-	// Should only copy for those that have expected keys which don't exist,
-	// should have a short timeout,
-	podList, err := c.ClientListPods(metav1.ListOptions{})
+// For each pod already running in the namespace, call copyAllTokens and copyAllK8sPodInfo.
+// Necessary when server restarts to cache information about pods collected during createPodStartJobs.
+func (c *clientsetWrapper) copyTokensInfoExistingPods() error {
+	listOptions := metav1.ListOptions{
+		LabelSelector: "app notin (user-pods-backend, user-pods-backend-testing)",
+	}
+	podList, err := c.ClientListPods(listOptions)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list pods: %s", err))
 	}
 	for _, pod := range podList.Items {
-		c.copyAllTokens(&pod)
+		c.copyAllTokens(&pod, true)
+		c.copyAllK8sPodInfo(&pod)
 	}
 	return nil
 }
@@ -1648,7 +1668,7 @@ func main() {
 	csWrapper := clientsetWrapper{
 		clientset: getClientset(),
 	}
-	err := csWrapper.copyTokensExistingPods()
+	err := csWrapper.copyTokensInfoExistingPods()
 	if err != nil {
 		panic(fmt.Sprintf("Error: %s", err.Error()))
 	}
