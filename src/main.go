@@ -93,6 +93,14 @@ type clientsetWrapper struct {
 	clientset *kubernetes.Clientset
 }
 
+type WatchCreatePodRequest struct {
+	PodName string `json:"pod_name"`
+}
+
+type WatchCreatePodResponse struct {
+	Success bool `json:"success"`
+}
+
 // Generate the structs with methods for interacting with the k8s api.
 func getClientset() *kubernetes.Clientset {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
@@ -1213,7 +1221,7 @@ func (c *clientsetWrapper) serveCreatePod(w http.ResponseWriter, r *http.Request
 	go func() {
 		success := <-finished
 		// if createPod returned without error, but not all objects reached desired state,
-		if (err != nil) && (!success) {
+		if (err == nil) && (!success) {
 			deleteRequest := DeletePodRequest{
 				UserID:   request.UserID,
 				PodName:  podName,
@@ -1706,6 +1714,27 @@ func (c *clientsetWrapper) copyTokensInfoExistingPods() error {
 	return nil
 }
 
+// Watching functions
+
+func (c *clientsetWrapper) watchCreatePod(podName string) bool {
+	ch := make(chan bool, 1)
+	c.watchFor(podName, 10 * time.Second, "Pod", signalPodReady, ch)
+	return <- ch
+}
+
+func (c *clientsetWrapper) serveWatchCreatePod(w http.ResponseWriter, r *http.Request) {
+	var request WatchCreatePodRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+
+	response := WatchCreatePodResponse{}
+	response.Success = c.watchCreatePod(request.PodName)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	csWrapper := clientsetWrapper{
 		clientset: getClientset(),
@@ -1720,6 +1749,7 @@ func main() {
 	http.HandleFunc("/delete_pod", csWrapper.serveDeletePod)
 	http.HandleFunc("/clean_unused", csWrapper.serveCleanAllUnused)
 	http.HandleFunc("/delete_all_user", csWrapper.serveDeleteAllPodsUser)
+	http.HandleFunc("/watch_create_pod", csWrapper.serveWatchCreatePod)
 
 	fmt.Printf("Listening\n")
 	err = http.ListenAndServe(":80", nil)
