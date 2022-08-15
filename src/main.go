@@ -1160,14 +1160,6 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 		userStorageReady <- true
 	}
 
-	// create the pod
-	createdPod, err := c.ClientCreatePod(&targetPod, podReady)
-	if err != nil {
-		createPodFinished <- false
-		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
-	}
-	fmt.Printf("CREATED POD: %s\n", createdPod.Name)
-
 	// create the ssh service if necessary
 	if needsSshService(&targetPod) {
 		err = c.startSshService(&targetPod)
@@ -1176,6 +1168,14 @@ func (c *clientsetWrapper) createPod(request CreatePodRequest, createPodFinished
 			return "", errors.New(fmt.Sprintf("Error while creating service: %s", err.Error()))
 		}
 	}
+
+	// create the pod
+	createdPod, err := c.ClientCreatePod(&targetPod, podReady)
+	if err != nil {
+		createPodFinished <- false
+		return "", errors.New(fmt.Sprintf("Failed to create pod: %s", err.Error()))
+	}
+	fmt.Printf("CREATED POD: %s\n", createdPod.Name)
 
 	go c.createPodStartJobs(createdPod, allObjectsReady, createPodFinished)
 
@@ -1526,6 +1526,33 @@ func getPVCUserID(pvc apiv1.PersistentVolumeClaim) string {
 	return uid
 }
 
+// Delete orphaned temporary files for pods that have been deleted
+// dirNameFunc(podName) should output the temp file directory for that pod
+func cleanTempFiles(podNames map[string]bool, dirNameFunc func(string) string) error {
+	files, err := ioutil.ReadDir(dirNameFunc(""))
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list token directory: %s\n", err.Error()))
+	}
+	for _, file := range files {
+		filename := file.Name()
+		inUse := false
+		for podName, _ := range podNames {
+			if podName == filename {
+				inUse = true
+				break
+			}
+		}
+		if !inUse {
+			deleteDirName := dirNameFunc(filename)
+			err = os.RemoveAll(deleteDirName)
+			if err != nil {
+				return errors.New(fmt.Sprintf("Couldn't delete directory %s: %s\n", deleteDirName, err.Error()))
+			}
+		}
+	}
+	return nil
+}
+
 // Remove all the unused user storage and tempfiles
 func (c *clientsetWrapper) cleanAllUnused(finished chan<- bool) error {
 	podList, err := c.getUserPodList("")
@@ -1534,10 +1561,10 @@ func (c *clientsetWrapper) cleanAllUnused(finished chan<- bool) error {
 	}
 
 	// Get a list of all pods and pod owners
-	var podNameList []string
+	podNames := make(map[string]bool)
 	userIDsWithPods := make(map[string]bool)
 	for _, pod := range podList.Items {
-		podNameList = append(podNameList, pod.Name)
+		podNames[pod.Name] = true
 		userID := getUserID(
 			pod.ObjectMeta.Labels["user"],
 			pod.ObjectMeta.Labels["domain"],
@@ -1603,23 +1630,37 @@ func (c *clientsetWrapper) cleanAllUnused(finished chan<- bool) error {
 	}
 
 	// Clean Temporary Files
-	files, err := ioutil.ReadDir(getPodTokenDir(""))
+	err = cleanTempFiles(podNames, getPodTokenDir)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't list token directory: %s\n", err.Error()))
+		return err
 	}
-	for _, file := range files {
-		filename := file.Name()
-		inUse := false
-		for _, podName := range podNameList {
-			if podName == filename {
-				inUse = true
-				break
-			}
+	err = cleanTempFiles(podNames, getK8sPodInfoDir)
+	if err != nil {
+		return err
+	}
+
+	// Clean Services
+	listOptions := metav1.ListOptions{
+		LabelSelector: "createdForPod",
+	}
+	SvcList, err := c.ClientListServices(listOptions)
+	if err != nil {
+		return err
+	}
+	for _, svc := range SvcList.Items {
+		podName, svcHasPodLabel := svc.ObjectMeta.Labels["createdForPod"]
+		// if the createdForPod label is empty, move on to the next service
+		if !svcHasPodLabel {
+			continue
 		}
-		if !inUse {
-			err = os.RemoveAll(getPodTokenDir(filename))
+		// if the pod is running, then its name will be in the map of podNames
+		_, podIsRunning := podNames[podName]
+		if !podIsRunning {
+			ch := make(chan bool, 1)
+			allChans = append(allChans, ch)
+			err = c.ClientDeleteService(svc.Name, ch)
 			if err != nil {
-				return errors.New(fmt.Sprintf("Couldn't delete unused files: %s\n", err.Error()))
+				return errors.New(fmt.Sprintf("Error while deleting service %s: %s", svc.Name, err.Error()))
 			}
 		}
 	}
@@ -1634,6 +1675,7 @@ func (c *clientsetWrapper) serveCleanAllUnused(w http.ResponseWriter, r *http.Re
 	status := http.StatusOK
 	reply := "Success\n"
 	if err != nil {
+		trySend(finished, false)
 		fmt.Printf("Error while cleaning unused: %s\n", err.Error())
 		status = http.StatusBadRequest
 		reply = "Error\n"
