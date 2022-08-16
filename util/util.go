@@ -1,9 +1,9 @@
 package util
 
 import (
-	"http"
+	"net/http"
 	"regexp"
-	"ioutil"
+	"io/ioutil"
 	"os"
 	"fmt"
 )

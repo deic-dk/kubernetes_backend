@@ -2,31 +2,18 @@ package managed
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"net/http"
 	"os"
-	"reflect"
-	"regexp"
 	"strings"
 	"time"
+	"encoding/gob"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
-	"github.com/deic.dk/user_pods_k8s_backend/server"
-	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	watch "k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 )
 
 const tokenByteLimit = 4096
@@ -60,16 +47,39 @@ func (u *User) GetListOptions() metav1.ListOptions {
 	return opt
 }
 
-func (u *User) GetPodList() (*apiv1.PodList, error) {
-	return u.Client.ListPods(u.GetListOptions())
+func (u *User) ListPods() ([]Pod, error) {
+	var pods []Pod
+	podList, err := u.Client.ListPods(u.GetListOptions())
+	if err != nil {
+		return pods, err
+	}
+	pods = make([]Pod, len(podList.Items))
+	for i, pod := range(podList.Items) {
+		pods[i] = NewExistingPod(&pod, u.Client)
+	}
+	return pods, nil
 }
 
 // Struct for data to cache for quick getPods responses
 // podTmpFiles[key] is for /tmp/key created by the pod,
-// k8sPodInfo is for data about api objects relevant for the pod, e.g. sshport
-type podTokens struct {
-	podTmpFiles map[string]string
-	k8sPodInfo map[string]string
+// otherResourceInfo is for data about other k8s resources related to the pod, e.g. sshport
+type podCache struct {
+	tokens map[string]string
+	otherResourceInfo map[string]string
+}
+
+type PodInfo struct {
+	PodName           string            `json:"pod_name"`
+	ContainerName     string            `json:"container_name"`
+	ImageName         string            `json:"image_name"`
+	PodIP             string            `json:"pod_ip"`
+	NodeIP            string            `json:"node_ip"`
+	Owner             string            `json:"owner"`
+	Age               string            `json:"age"`
+	Status            string            `json:"status"`
+	Url               string            `json:"url"`
+	Tokens            map[string]string `json:"tokens"`
+	OtherResourceInfo map[string]string `json:"k8s_pod_info"`
 }
 
 type Pod struct {
@@ -77,7 +87,7 @@ type Pod struct {
 	Owner User
 	Exists bool
 	Client k8sclient.K8sClient
-	tokens podTokens
+	cache *podCache
 }
 
 func NewExistingPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
@@ -95,24 +105,25 @@ func NewExistingPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 		}
 		owner = NewUser(userStr, client)
 	}
+	cache := &podCache{
+		tokens: make(map[string]string),
+		otherResourceInfo: make(map[string]string),
+	}
 	return Pod{
 		Object: existingPod,
 		Exists: true,
 		Client: client,
 		Owner: owner,
+		cache: cache,
 	}
 }
 
-func (p *Pod) getTokenDir() string {
+func (p *Pod) getCacheFile() string {
 	return fmt.Sprintf("%s/%s", p.Client.TokenDir, p.Object.Name)
 }
 
-func (p *Pod) getInfoDir() string {
-	return fmt.Sprintf("%s/%s", p.Client.InfoDir, p.Object.Name)
-}
-
-func (p *Pod) getPodInfo() server.GetPodsResponse {
-	var podInfo server.GetPodsResponse
+func (p *Pod) GetPodInfo() PodInfo {
+	var podInfo PodInfo
 	var ageSec float64
 	var startTimeStr string
 	// p.Object.Status.StartTime might not exist yet. Check to avoid panic
@@ -132,27 +143,13 @@ func (p *Pod) getPodInfo() server.GetPodsResponse {
 	podInfo.PodName = p.Object.Name
 	podInfo.Status = fmt.Sprintf("%s:%s", p.Object.Status.Phase, startTimeStr)
 
-	// Initialize the tokens map so it can be written into in the following block
-	podInfo.Tokens = make(map[string]string)
-	for key, value := range p.Object.ObjectMeta.Annotations {
-		// If this key is specified in the manifest to be copied from /tmp/key and shown to the user in the frontend
-		if value == "copyForFrontend" {
-			filename := fmt.Sprintf("%s/%s", p.getTokenDir(), key)
-			content, err := ioutil.ReadFile(filename)
-			if err != nil {
-				// If the file is missing, just let the key be absent for the user, but log that it occurred
-				fmt.Printf("Couldn't copy tokens (maybe not ready yet) from file %s: %s\n", filename, err.Error())
-				continue
-			}
-			podInfo.Tokens[key] = string(content)
-		}
-	}
-
-	k8sPodInfo, err := fillK8sPodInfo(p.Object)
+	err := p.loadPodCache()
 	if err != nil {
-		fmt.Printf("Couldn't copy k8s pod info for pod %s: %s\n", p.Object.Name, err.Error())
+		fmt.Printf("Error while loading tokens for pod %s: %s\n", p.Object.Name, err.Error())
+	} else {
+		podInfo.Tokens = p.cache.tokens
+		podInfo.OtherResourceInfo = p.cache.otherResourceInfo
 	}
-	podInfo.K8sPodInfo = k8sPodInfo
 
 	// TODO get url from ingress
 	return podInfo
@@ -171,7 +168,7 @@ func (p *Pod) needsSshService() bool {
 	return listensSsh
 }
 
-// get the
+// get the contents of /tmp/key inside the first container of the pod
 func (p *Pod) getTmpFile(key string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	var err error
@@ -182,7 +179,7 @@ func (p *Pod) getTmpFile(key string) (string, error) {
 	if stdout.Len() == 0 {
 		return "", errors.New(fmt.Sprintf("Empty response. Stderr: %s", stderr.String()))
 	}
-	// read the first tokenByteLimit bytes from the buffer, and write it to the file
+	// read the first tokenByteLimit bytes from the buffer
 	var readBytes []byte
 	if stdout.Len() < tokenByteLimit {
 		readBytes = stdout.Bytes()
@@ -193,8 +190,8 @@ func (p *Pod) getTmpFile(key string) (string, error) {
 	return string(readBytes), nil
 }
 
-// attempt fill in p.tokens.podTmpFiles from the temp files in the running pod
-func (p *Pod) fillAllTokens(oneTry bool) {
+// attempt fill in p.cache.podTmpFiles from the temp files in the running pod
+func (p *Pod) fillAllTmpFiles(oneTry bool) {
 	var toCopy []string
 	for key, value := range p.Object.ObjectMeta.Annotations {
 		if value == "copyForFrontend" {
@@ -205,14 +202,14 @@ func (p *Pod) fillAllTokens(oneTry bool) {
 		var err error
 		if oneTry {
 			// if reloading tokens of pods that should already have created /tmp/key
-			p.tokens.podTmpFiles[key], err = p.getTmpFile(key)
+			p.cache.tokens[key], err = p.getTmpFile(key)
 			if err != nil {
 				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
 			}
 		} else {
 			// give a new pod up to 10s to create /tmp/key before giving up
 			for i := 0; i < 10; i++ {
-				p.tokens.podTmpFiles[key], err = p.getTmpFile(key)
+				p.cache.tokens[key], err = p.getTmpFile(key)
 				if err != nil {
 					time.Sleep(time.Second)
 					continue
@@ -226,4 +223,93 @@ func (p *Pod) fillAllTokens(oneTry bool) {
 			}
 		}
 	}
+}
+
+func (p *Pod) ListServices() (*apiv1.ServiceList, error) {
+	opt := metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("createdForPod=%s", p.Object.Name),
+	}
+	return p.Client.ListServices(opt)
+}
+
+func (p *Pod) getSshPort() (string, error) {
+	var sshPort int32 = 0
+	serviceList, err := p.ListServices()
+	if err != nil {
+		return "", err
+	}
+	// List through all the services created for this pod
+	for _, service := range serviceList.Items {
+		// Find the one created for ssh
+		if service.Name == fmt.Sprintf("%s-ssh", p.Object.Name) {
+			for _, portEntry := range service.Spec.Ports {
+				// Find the port object that points to 22 in the pod
+				if portEntry.TargetPort == intstr.FromInt(22) {
+					// The node port is what the client should try to connect to
+					sshPort = portEntry.NodePort
+					break
+				}
+			}
+			break
+		}
+	}
+	if sshPort == 0 {
+		return "", errors.New("Ssh service nodePort not found")
+	}
+	return string(sshPort), nil
+}
+
+func (p *Pod) fillOtherResourceInfo() {
+	// if any of k8s pod info should be copied (currently only sshPort is used), then make the directory
+	if p.needsSshService() {
+		sshPort, err := p.getSshPort()
+		if err != nil {
+			fmt.Printf("Error while copying ssh port for pod %s: %s\n", p.Object.Name, err.Error())
+		} else {
+			p.cache.otherResourceInfo["sshPort"] = sshPort
+		}
+	}
+}
+
+func (p *Pod) savePodCache() error {
+	b := new(bytes.Buffer)
+	e := gob.NewEncoder(b)
+	// encode pod tokens into the bytes buffer
+	err := e.Encode(p.cache)
+	if err != nil {
+		return err
+	}
+
+	// if the token file exists, delete it
+	err = os.Remove(p.getCacheFile())
+	if err != nil {
+		// if there was an error other than that the file didn't exist
+		if !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	// save the buffer
+	err = ioutil.WriteFile(p.getCacheFile(), b.Bytes(), 0600)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Pod) loadPodCache() error {
+	// create an io.Reader for the file
+	file, err := os.Open(p.getCacheFile())
+	if err != nil {
+		return err
+	}
+
+	d := gob.NewDecoder(file)
+	// decode the file's contents into p.cache
+	err = d.Decode(p.cache)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

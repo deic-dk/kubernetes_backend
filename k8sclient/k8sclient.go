@@ -3,23 +3,13 @@ package k8sclient
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"os"
-	"reflect"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -29,13 +19,12 @@ import (
 
 // Struct to wrap kubernetes client functions
 type K8sClient struct {
-	config *rest.Config
-	clientset *kubernetes.Clientset
-	namespace string
+	config        *rest.Config
+	clientset     *kubernetes.Clientset
+	namespace     string
 	timeoutDelete time.Duration
 	timeoutCreate time.Duration
-	TokenDir string
-	InfoDir string
+	TokenDir      string
 }
 
 // initialize a new K8SClient
@@ -51,14 +40,13 @@ func NewK8sClient() *K8sClient {
 		panic(err.Error())
 	}
 	return &K8sClient{
-		config: config,
+		config:    config,
 		clientset: clientset,
 		// TODO figure out how to get the namespace automatically from within the pod where this runs
-		namespace: "sciencedata-dev",
+		namespace:     "sciencedata-dev",
 		timeoutDelete: 90 * time.Second,
 		timeoutCreate: 90 * time.Second,
-		TokenDir: "/tmp/tokens",
-		InfoDir: "/tmp/k8spodinfo",
+		TokenDir:      "/tmp/tokens",
 	}
 }
 
@@ -271,4 +259,3 @@ func (c *K8sClient) PodExec(command []string, pod *apiv1.Pod, nContainer int) (b
 	}
 	return stdout, stderr, nil
 }
-
