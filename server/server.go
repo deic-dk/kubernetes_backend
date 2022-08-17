@@ -16,6 +16,7 @@ import (
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
+	"github.com/deic.dk/user_pods_k8s_backend/podcreator"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -67,27 +68,25 @@ type DeleteAllPodsResponse struct {
 	PodNames []string `json:"pod_names"`
 }
 
-type podGetter struct {
-	Client *k8sclient.K8sClient
-}
-
 type Server struct {
-	Client *k8sclient.K8sClient
-	Getter *podGetter
+	Client       k8sclient.K8sClient
+	CreatingPods map[string]struct{}
+	DeletingPods map[string]struct{}
 }
 
-func New(client *k8sclient.K8sClient) *Server {
+func New(client k8sclient.K8sClient) *Server {
 	return &Server{
-		Client: client,
-		Getter: &podGetter{Client: client},
+		Client:       client,
+		CreatingPods: make(map[string]struct{}),
+		DeletingPods: make(map[string]struct{}),
 	}
 }
 
 // Fills in a getPodsResponse with information about all the pods owned by the user.
 // If the username string is empty, use all pods in the namespace.
-func (g *podGetter) getPods(userID string) ([]managed.PodInfo, error) {
-	var response []managed.PodInfo
-	user := managed.NewUser(userID, *g.Client)
+func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
+	var response GetPodsResponse
+	user := managed.NewUser(request.UserID, s.Client)
 	podList, err := user.ListPods()
 	if err != nil {
 		return response, err
@@ -99,3 +98,27 @@ func (g *podGetter) getPods(userID string) ([]managed.PodInfo, error) {
 	return response, nil
 }
 
+func (s *Server) createPod(request CreatePodRequest) (CreatePodResponse, error) {
+	var response CreatePodResponse
+	// make podCreator
+	creator, err := podcreator.NewPodCreator(
+		request.YamlURL,
+		managed.NewUser(request.UserID, s.Client),
+		request.ContainerEnvVars,
+		request.AllEnvVars,
+		request.RemoteIP,
+		s.Client,
+	)
+	if err != nil {
+		return response, err
+	}
+
+	// create pod
+	ready := make(chan bool, 1)
+	pod, err := creator.CreatePod(ready)
+	if err != nil {
+		return response, err
+	}
+	response.PodName = pod.Object.Name
+	return response, nil
+}

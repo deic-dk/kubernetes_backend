@@ -2,30 +2,35 @@ package managed
 
 import (
 	"bytes"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"regexp"
 	"strings"
 	"time"
-	"encoding/gob"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/scheme"
 )
 
 const tokenByteLimit = 4096
 
 type User struct {
 	UserID string
-	Name string
+	Name   string
 	Domain string
+	SiloIP string
 	Client k8sclient.K8sClient
 }
 
-func NewUser(userID string, client k8sclient.K8sClient) User {
+func NewUser(userID string, siloIP string, client k8sclient.K8sClient) User {
 	if userID == "" {
 		return User{Client: client}
 	}
@@ -33,9 +38,10 @@ func NewUser(userID string, client k8sclient.K8sClient) User {
 	name, domain, _ := strings.Cut(userID, "@")
 	return User{
 		UserID: userID,
-		Name: name,
+		Name:   name,
 		Domain: domain,
 		Client: client,
+		SiloIP: siloIP,
 	}
 }
 
@@ -54,17 +60,102 @@ func (u *User) ListPods() ([]Pod, error) {
 		return pods, err
 	}
 	pods = make([]Pod, len(podList.Items))
-	for i, pod := range(podList.Items) {
-		pods[i] = NewExistingPod(&pod, u.Client)
+	for i, pod := range podList.Items {
+		pods[i] = NewPod(&pod, u.Client)
 	}
 	return pods, nil
+}
+
+// Make a unique string to identify userID in api objects
+func (u *User) GetUserString() string {
+	userString := strings.Replace(u.UserID, "@", "-", -1)
+	userString = strings.Replace(userString, ".", "-", -1)
+	return userString
+}
+
+// Return a unique name for the user's /tank/storage PV and PVC (same name used for both)
+func (u *User) GetStoragePVName() string {
+	return fmt.Sprintf("user-storage-%s", u.GetUserString())
+}
+
+// Return list options for finding the user's PV and PVC (since they have the same name)
+func (u *User) GetStorageListOptions() metav1.ListOptions {
+	return metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", u.GetStoragePVName())}
+}
+
+// Generate an api object for the PV to attempt to create for the user's /tank/storage
+func (u *User) GetTargetStoragePV() *apiv1.PersistentVolume {
+	return &apiv1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: u.GetStoragePVName(),
+			Labels: map[string]string{
+				"name":   u.GetStoragePVName(),
+				"user":   u.Name,
+				"domain": u.Domain,
+				"server": u.SiloIP,
+			},
+		},
+		Spec: apiv1.PersistentVolumeSpec{
+			AccessModes: []apiv1.PersistentVolumeAccessMode{
+				"ReadWriteMany",
+			},
+			PersistentVolumeReclaimPolicy: apiv1.PersistentVolumeReclaimRetain,
+			StorageClassName:              "nfs",
+			MountOptions: []string{
+				"hard",
+				"nfsvers=4.1",
+			},
+			PersistentVolumeSource: apiv1.PersistentVolumeSource{
+				NFS: &apiv1.NFSVolumeSource{
+					Server: u.SiloIP,
+					Path:   fmt.Sprintf("/tank/storage/%s", u.UserID),
+				},
+			},
+			ClaimRef: &apiv1.ObjectReference{
+				Namespace: u.Client.Namespace,
+				Name:      u.GetStoragePVName(),
+				Kind:      "PersistentVolumeClaim",
+			},
+			Capacity: apiv1.ResourceList{
+				apiv1.ResourceStorage: resource.MustParse("10Gi"),
+			},
+		},
+	}
+}
+
+// Generate an api object for the PVC to attempt to create for the user's /tank/storage
+func (u *User) GetTargetStoragePVC() *apiv1.PersistentVolumeClaim {
+	return &apiv1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: u.Client.Namespace,
+			Name:      u.GetStoragePVName(),
+			Labels: map[string]string{
+				"name":   u.GetStoragePVName(),
+				"user":   u.UserID,
+				"domain": u.Domain,
+				"server": u.SiloIP,
+			},
+		},
+		Spec: apiv1.PersistentVolumeClaimSpec{
+			//			StorageClassName: "nfs",
+			AccessModes: []apiv1.PersistentVolumeAccessMode{
+				"ReadWriteMany",
+			},
+			VolumeName: u.GetStoragePVName(),
+			Resources: apiv1.ResourceRequirements{
+				Requests: apiv1.ResourceList{
+					apiv1.ResourceStorage: resource.MustParse("10Gi"),
+				},
+			},
+		},
+	}
 }
 
 // Struct for data to cache for quick getPods responses
 // podTmpFiles[key] is for /tmp/key created by the pod,
 // otherResourceInfo is for data about other k8s resources related to the pod, e.g. sshport
 type podCache struct {
-	tokens map[string]string
+	tokens            map[string]string
 	otherResourceInfo map[string]string
 }
 
@@ -84,13 +175,12 @@ type PodInfo struct {
 
 type Pod struct {
 	Object *apiv1.Pod
-	Owner User
-	Exists bool
+	Owner  User
 	Client k8sclient.K8sClient
-	cache *podCache
+	cache  *podCache
 }
 
-func NewExistingPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
+func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 	var owner User
 	user, hasUser := existingPod.ObjectMeta.Labels["user"]
 	if !hasUser {
@@ -106,15 +196,14 @@ func NewExistingPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 		owner = NewUser(userStr, client)
 	}
 	cache := &podCache{
-		tokens: make(map[string]string),
+		tokens:            make(map[string]string),
 		otherResourceInfo: make(map[string]string),
 	}
 	return Pod{
 		Object: existingPod,
-		Exists: true,
 		Client: client,
-		Owner: owner,
-		cache: cache,
+		Owner:  owner,
+		cache:  cache,
 	}
 }
 
@@ -190,7 +279,7 @@ func (p *Pod) getTmpFile(key string) (string, error) {
 	return string(readBytes), nil
 }
 
-// attempt fill in p.cache.podTmpFiles from the temp files in the running pod
+// attempt fill in p.cache.podTmpFiles[key] for each file /tmp/key in the running pod's first container
 func (p *Pod) fillAllTmpFiles(oneTry bool) {
 	var toCopy []string
 	for key, value := range p.Object.ObjectMeta.Annotations {
@@ -259,8 +348,8 @@ func (p *Pod) getSshPort() (string, error) {
 	return string(sshPort), nil
 }
 
+// fill p.cache.otherResourceInfo with information about other k8s resources relevant to the pod
 func (p *Pod) fillOtherResourceInfo() {
-	// if any of k8s pod info should be copied (currently only sshPort is used), then make the directory
 	if p.needsSshService() {
 		sshPort, err := p.getSshPort()
 		if err != nil {
@@ -269,6 +358,8 @@ func (p *Pod) fillOtherResourceInfo() {
 			p.cache.otherResourceInfo["sshPort"] = sshPort
 		}
 	}
+	// other information about related resources that should be cached for inclusion in GetPodInfo
+	// should be included here
 }
 
 func (p *Pod) savePodCache() error {
@@ -312,4 +403,15 @@ func (p *Pod) loadPodCache() error {
 	}
 
 	return nil
+}
+
+func (p *Pod) CheckState() {
+	// reload with client.ListPods and check p.Object.Status
+	// if needs user storage, check that it's present
+	// if needsssh, check that it's present
+	// check that cache is filled
+}
+
+func (p *Pod) WatchForReady() {
+	// watch for pod status
 }

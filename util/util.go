@@ -1,11 +1,13 @@
 package util
 
 import (
-	"net/http"
-	"regexp"
-	"io/ioutil"
-	"os"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"regexp"
+
+	apiv1 "k8s.io/api/core/v1"
 )
 
 // Do ch<-value if the channel is ready to receive a value,
@@ -72,3 +74,16 @@ func ReadSavedMap(dirName string) (map[string]string, error) {
 	return savedMap, nil
 }
 
+// Returns whether a pod has a container listening on port 22
+func NeedsSshService(pod *apiv1.Pod) bool {
+	listensSsh := false
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			if port.ContainerPort == 22 {
+				listensSsh = true
+				break
+			}
+		}
+	}
+	return listensSsh
+}

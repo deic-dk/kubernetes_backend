@@ -21,9 +21,9 @@ import (
 type K8sClient struct {
 	config        *rest.Config
 	clientset     *kubernetes.Clientset
-	namespace     string
 	timeoutDelete time.Duration
 	timeoutCreate time.Duration
+	Namespace     string
 	TokenDir      string
 }
 
@@ -43,7 +43,7 @@ func NewK8sClient() *K8sClient {
 		config:    config,
 		clientset: clientset,
 		// TODO figure out how to get the namespace automatically from within the pod where this runs
-		namespace:     "sciencedata-dev",
+		Namespace:     "sciencedata-dev",
 		timeoutDelete: 90 * time.Second,
 		timeoutCreate: 90 * time.Second,
 		TokenDir:      "/tmp/tokens",
