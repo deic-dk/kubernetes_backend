@@ -7,17 +7,15 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
+	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/kubernetes/scheme"
 )
 
 const tokenByteLimit = 4096
@@ -45,6 +43,11 @@ func NewUser(userID string, siloIP string, client k8sclient.K8sClient) User {
 	}
 }
 
+// Return the user's siloIP in the subnet where data can be accessed by the pods.
+func (u *User) GetSiloIPDataNet() string {
+	return strings.Replace(u.SiloIP, "10.0.", "10.2.", 1)
+}
+
 func (u *User) GetListOptions() metav1.ListOptions {
 	opt := metav1.ListOptions{}
 	if u.UserID != "" {
@@ -60,8 +63,8 @@ func (u *User) ListPods() ([]Pod, error) {
 		return pods, err
 	}
 	pods = make([]Pod, len(podList.Items))
-	for i, pod := range podList.Items {
-		pods[i] = NewPod(&pod, u.Client)
+	for i := 0; i < len(podList.Items); i++ {
+		pods[i] = NewPod(&podList.Items[i], u.Client)
 	}
 	return pods, nil
 }
@@ -155,8 +158,8 @@ func (u *User) GetTargetStoragePVC() *apiv1.PersistentVolumeClaim {
 // podTmpFiles[key] is for /tmp/key created by the pod,
 // otherResourceInfo is for data about other k8s resources related to the pod, e.g. sshport
 type podCache struct {
-	tokens            map[string]string
-	otherResourceInfo map[string]string
+	Tokens            map[string]string
+	OtherResourceInfo map[string]string
 }
 
 type PodInfo struct {
@@ -184,7 +187,7 @@ func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 	var owner User
 	user, hasUser := existingPod.ObjectMeta.Labels["user"]
 	if !hasUser {
-		owner = NewUser("", client)
+		owner = NewUser("", "", client)
 	} else {
 		var userStr string
 		domain, hasDomain := existingPod.ObjectMeta.Labels["domain"]
@@ -193,11 +196,11 @@ func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 		} else {
 			userStr = user
 		}
-		owner = NewUser(userStr, client)
+		owner = NewUser(userStr, "", client)
 	}
 	cache := &podCache{
-		tokens:            make(map[string]string),
-		otherResourceInfo: make(map[string]string),
+		Tokens:            make(map[string]string),
+		OtherResourceInfo: make(map[string]string),
 	}
 	return Pod{
 		Object: existingPod,
@@ -236,8 +239,8 @@ func (p *Pod) GetPodInfo() PodInfo {
 	if err != nil {
 		fmt.Printf("Error while loading tokens for pod %s: %s\n", p.Object.Name, err.Error())
 	} else {
-		podInfo.Tokens = p.cache.tokens
-		podInfo.OtherResourceInfo = p.cache.otherResourceInfo
+		podInfo.Tokens = p.cache.Tokens
+		podInfo.OtherResourceInfo = p.cache.OtherResourceInfo
 	}
 
 	// TODO get url from ingress
@@ -291,14 +294,14 @@ func (p *Pod) fillAllTmpFiles(oneTry bool) {
 		var err error
 		if oneTry {
 			// if reloading tokens of pods that should already have created /tmp/key
-			p.cache.tokens[key], err = p.getTmpFile(key)
+			p.cache.Tokens[key], err = p.getTmpFile(key)
 			if err != nil {
 				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
 			}
 		} else {
 			// give a new pod up to 10s to create /tmp/key before giving up
 			for i := 0; i < 10; i++ {
-				p.cache.tokens[key], err = p.getTmpFile(key)
+				p.cache.Tokens[key], err = p.getTmpFile(key)
 				if err != nil {
 					time.Sleep(time.Second)
 					continue
@@ -348,14 +351,14 @@ func (p *Pod) getSshPort() (string, error) {
 	return string(sshPort), nil
 }
 
-// fill p.cache.otherResourceInfo with information about other k8s resources relevant to the pod
+// fill p.cache.OtherResourceInfo with information about other k8s resources relevant to the pod
 func (p *Pod) fillOtherResourceInfo() {
 	if p.needsSshService() {
 		sshPort, err := p.getSshPort()
 		if err != nil {
 			fmt.Printf("Error while copying ssh port for pod %s: %s\n", p.Object.Name, err.Error())
 		} else {
-			p.cache.otherResourceInfo["sshPort"] = sshPort
+			p.cache.OtherResourceInfo["sshPort"] = sshPort
 		}
 	}
 	// other information about related resources that should be cached for inclusion in GetPodInfo
@@ -365,7 +368,7 @@ func (p *Pod) fillOtherResourceInfo() {
 func (p *Pod) savePodCache() error {
 	b := new(bytes.Buffer)
 	e := gob.NewEncoder(b)
-	// encode pod tokens into the bytes buffer
+	// encode pod cache into the bytes buffer
 	err := e.Encode(p.cache)
 	if err != nil {
 		return err
@@ -414,4 +417,132 @@ func (p *Pod) CheckState() {
 
 func (p *Pod) WatchForReady() {
 	// watch for pod status
+}
+
+// Wait until each channel in requiredToStartJobs has an input,
+// then if each input is true, attempt to perform all start jobs.
+// send true into finishedStartJobs when all jobs finish successfully,
+// or send false if any step fails
+func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []<-chan bool, finishedStartJobs chan<- bool) {
+	ready := make(chan bool, 1)
+	// block this function until a result is read from each channel in requiredToStartJobs
+	util.CombineBoolChannels(requiredToStartJobs, ready)
+	if !(<-ready) {
+		fmt.Printf("Pod %s, related services, and/or user storage didn't reach ready state. Start jobs not attempted.\n", p.Object.Name)
+		util.TrySend(finishedStartJobs, false)
+		return
+	}
+
+	// Perform start jobs here
+	if p.needsSshService() {
+		p.startSshService()
+	}
+	p.copyAllTokens(false)
+	p.fillOtherResourceInfo()
+	err := p.savePodCache()
+	if err != nil {
+		fmt.Printf("Failed to save pod cache for pod %s: %s\n", p.Object.Name, err.Error())
+		util.TrySend(finishedStartJobs, false)
+		return
+	}
+
+	// TODO ingress
+
+	util.TrySend(finishedStartJobs, true)
+}
+
+// for each pod.metadata.annotations[key]=="copyForFrontend",
+// copy the token from the pod held in /tmp/key to the filesystem, ready to be served by getPods.
+// If reload is true, it will only attempt each token once,
+// otherwise, it will try a few times to give the pod time to create /tmp/key after starting
+func (p *Pod) copyAllTokens(reload bool) {
+	var toCopy []string
+	for key, value := range p.Object.ObjectMeta.Annotations {
+		if value == "copyForFrontend" {
+			toCopy = append(toCopy, key)
+		}
+	}
+	for _, key := range toCopy {
+		var err error
+		if reload {
+			// if reloading tokens of pods that should already have created /tmp/key
+			err = p.copyToken(key)
+			if err != nil {
+				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
+			}
+		} else {
+			// give a new pod up to 10s to create /tmp/key before giving up
+			for i := 0; i < 10; i++ {
+				err = p.copyToken(key)
+				if err != nil {
+					time.Sleep(1 * time.Second)
+				} else {
+					break
+				}
+			}
+			// if it never succeeded, log the last error message
+			if err != nil {
+				fmt.Printf("Error while copying token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
+			}
+		}
+	}
+}
+
+// Try to copy /tmp/"key" in the created pod into /tmp into p.cache.tokens
+func (p *Pod) copyToken(key string) error {
+	var stdout, stderr bytes.Buffer
+	var err error
+	stdout, stderr, err = p.Client.PodExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, p.Object, 0)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't call pod exec for pod %s: %s", p.Object.Name, err.Error()))
+	}
+	if stdout.Len() == 0 {
+		return errors.New(fmt.Sprintf("Empty response. Stderr: %s", stderr.String()))
+	}
+	// read the first tokenByteLimit bytes from the buffer
+	var readBytes []byte
+	if stdout.Len() < tokenByteLimit {
+		readBytes = stdout.Bytes()
+	} else {
+		readBytes = make([]byte, tokenByteLimit)
+		stdout.Read(readBytes)
+	}
+	p.cache.Tokens[key] = string(readBytes)
+	return nil
+}
+
+// Start the ssh service required by this pod
+func (p *Pod) startSshService() error {
+	// TODO could add a check here to delete an orphaned service with the name that will be created here
+	service, err := p.Client.CreateService(p.getTargetSshService())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("DEBUG: Here is a service right after creation. Does it have a port listed? %+v\n", service)
+	return nil
+}
+
+// Get a target service object that will provide ssh port forwarding for this pod
+func (p *Pod) getTargetSshService() *apiv1.Service {
+	return &apiv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-ssh", p.Object.Name),
+			Labels: map[string]string{
+				"createdForPod": p.Object.Name,
+			},
+		},
+		Spec: apiv1.ServiceSpec{
+			Ports: []apiv1.ServicePort{
+				{
+					Name:       "ssh",
+					Protocol:   apiv1.ProtocolTCP,
+					Port:       22,
+					TargetPort: intstr.FromInt(22),
+				},
+			},
+			Type:        apiv1.ServiceTypeLoadBalancer,
+			Selector:    p.Object.ObjectMeta.Labels,
+			ExternalIPs: []string{p.Client.PublicIP},
+		},
+	}
 }

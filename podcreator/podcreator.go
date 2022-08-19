@@ -1,23 +1,18 @@
 package podcreator
 
 import (
-	"bytes"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"os"
+	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 )
 
@@ -29,8 +24,6 @@ type PodCreator struct {
 	yamlURL          string
 	user             managed.User
 	containerEnvVars map[string]map[string]string
-	allEnvVars       map[string]string
-	remoteIP         string
 	client           k8sclient.K8sClient
 }
 
@@ -44,16 +37,12 @@ func NewPodCreator(
 	yamlURL string,
 	user managed.User,
 	containerEnvVars map[string]map[string]string,
-	allEnvVars map[string]string,
-	remoteIP string,
 	client k8sclient.K8sClient,
 ) (PodCreator, error) {
 	creator := PodCreator{
 		yamlURL:          yamlURL,
 		user:             user,
 		containerEnvVars: containerEnvVars,
-		allEnvVars:       allEnvVars,
-		remoteIP:         remoteIP,
 		client:           client,
 		targetPod:        nil,
 	}
@@ -62,6 +51,15 @@ func NewPodCreator(
 		return creator, errors.New("Couldn't initialize PodCreator with a valid targetPod")
 	}
 	return creator, nil
+}
+
+// Return the map of environment variables that should be set in each container of
+// the target pod, so that pods can know how to reach the user's data
+func (pc *PodCreator) getMandatoryEnvVars() map[string]string {
+	mandatoryEnvVars := make(map[string]string)
+	mandatoryEnvVars["HOME_SERVER"] = pc.user.GetSiloIPDataNet()
+	mandatoryEnvVars["SD_UID"] = pc.user.UserID
+	return mandatoryEnvVars
 }
 
 // Retrieve the yaml manifest and parse it into a pod API object to attempt to create
@@ -153,7 +151,7 @@ func (pc *PodCreator) applyCreatePodSettings(targetPodObject *apiv1.Pod) {
 			}
 		}
 		// for each envvar that should be set in every container,
-		for name, value := range pc.allEnvVars {
+		for name, value := range pc.getMandatoryEnvVars() {
 			overwrite := false
 			// try to overwrite the value if the var already exists
 			for ii, env := range targetPodObject.Spec.Containers[i].Env {
@@ -285,6 +283,11 @@ func (pc *PodCreator) CreatePod(ready chan<- bool) (managed.Pod, error) {
 	}
 	pod = managed.NewPod(createdPod, pc.client)
 
+	startJobWaitChans := make([]<-chan bool, 2)
+	startJobWaitChans[0] = storageReady
+	startJobWaitChans[1] = podReady
+
+	go pod.RunStartJobsWhenReady(startJobWaitChans, ready)
 	return pod, nil
 }
 

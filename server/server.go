@@ -1,37 +1,19 @@
 package server
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
-	"os"
-	"reflect"
 	"regexp"
-	"strings"
-	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/podcreator"
-	"github.com/deic.dk/user_pods_k8s_backend/util"
-	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	watch "k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 )
 
 type GetPodsRequest struct {
-	UserID string `json:"user_id"`
+	UserID   string `json:"user_id"`
+	RemoteIP string
 }
 
 type GetPodsResponse []managed.PodInfo
@@ -86,7 +68,7 @@ func New(client k8sclient.K8sClient) *Server {
 // If the username string is empty, use all pods in the namespace.
 func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
 	var response GetPodsResponse
-	user := managed.NewUser(request.UserID, s.Client)
+	user := managed.NewUser(request.UserID, request.RemoteIP, s.Client)
 	podList, err := user.ListPods()
 	if err != nil {
 		return response, err
@@ -98,15 +80,40 @@ func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
 	return response, nil
 }
 
-func (s *Server) createPod(request CreatePodRequest) (CreatePodResponse, error) {
+// Handles the http request to get info about the user's pods
+func (s *Server) ServeGetPods(w http.ResponseWriter, r *http.Request) {
+	// parse the request
+	var request GetPodsRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	request.RemoteIP = getRemoteIP(r)
+	fmt.Printf("getPods request: %+v\n", request)
+
+	// get the list of pods
+	response, err := s.getPods(request)
+	var status int
+	if err != nil {
+		status = http.StatusBadRequest
+	} else {
+		status = http.StatusOK
+	}
+
+	// write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Makes a PodCreator to request that kubernetes create the pod.
+// Returns the pod's name without error if the request was made without error,
+// Then quietly waits for the pod to reach Ready state and runs start jobs.
+func (s *Server) createPod(request CreatePodRequest, finished chan<- bool) (CreatePodResponse, error) {
 	var response CreatePodResponse
 	// make podCreator
 	creator, err := podcreator.NewPodCreator(
 		request.YamlURL,
-		managed.NewUser(request.UserID, s.Client),
+		managed.NewUser(request.UserID, request.RemoteIP, s.Client),
 		request.ContainerEnvVars,
-		request.AllEnvVars,
-		request.RemoteIP,
 		s.Client,
 	)
 	if err != nil {
@@ -114,11 +121,60 @@ func (s *Server) createPod(request CreatePodRequest) (CreatePodResponse, error) 
 	}
 
 	// create pod
-	ready := make(chan bool, 1)
-	pod, err := creator.CreatePod(ready)
+	pod, err := creator.CreatePod(finished)
 	if err != nil {
 		return response, err
 	}
 	response.PodName = pod.Object.Name
 	return response, nil
+}
+
+// Handles the http request to create a pod for the user
+func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
+	// Parse the POSTed request JSON and log the request
+	var request CreatePodRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	request.RemoteIP = getRemoteIP(r)
+	fmt.Printf("createPod request: %+v\n", request)
+
+	finished := make(chan bool, 1)
+	response, err := s.createPod(request, finished)
+
+	var status int
+	if err != nil {
+		status = http.StatusBadRequest
+		fmt.Printf("Error: %s\n", err.Error())
+	} else {
+		status = http.StatusOK
+	}
+
+	// write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(response)
+
+	go func() {
+		success := <-finished
+		fmt.Printf("Pod %s reached ready %+v\n", response.PodName, success)
+		close(finished)
+	}()
+}
+
+// Server utility functions
+
+// Gets the IP of the source that made the request, either r.RemoteAddr,
+// or if it was forwarded, the first address in the X-Forwarded-For header
+func getRemoteIP(r *http.Request) string {
+	// When running this behind caddy, r.RemoteAddr is just the caddy process's IP addr,
+	// and X-Forward-For header should contain the silo's IP address.
+	// This may be different with ingress.
+	var siloIP string
+	value, forwarded := r.Header["X-Forwarded-For"]
+	if forwarded {
+		siloIP = value[0]
+	} else {
+		siloIP = r.RemoteAddr
+	}
+	return regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(siloIP)
 }
