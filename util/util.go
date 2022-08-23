@@ -6,9 +6,68 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"time"
+	"sync"
 
 	apiv1 "k8s.io/api/core/v1"
 )
+
+// type for signalling whether one-off events have completed successfully within a timeout
+type readyChannel struct {
+	ch chan bool
+	receivedYet bool
+	firstValue bool
+	mutex *sync.Mutex
+}
+
+// Return a new safeBoolChannel whith the timeout counting down
+func NewReadyChannel(timeout time.Duration) readyChannel {
+	ch := make(chan bool, 1)
+	var m sync.Mutex
+	rc := readyChannel{
+		ch: ch,
+		receivedYet: false,
+		firstValue: false,
+		mutex: &m,
+	}
+	go func() {
+		time.Sleep(timeout)
+		rc.Send(false)
+	}()
+	return rc
+}
+
+// Attempt to send value into the readyChannel's channel.
+// If the buffer is already full, this will do nothing.
+func (t *readyChannel) Send(value bool) {
+	select {
+	case t.ch <- value:
+	default:
+	}
+}
+
+// Return the first value that was input to t.Send().
+// If there hasn't been one yet, block until there is one.
+func (t *readyChannel) Receive() bool {
+	// use the readyChannel's mutex to block other goroutines where t.Receive is called until this returns
+	t.mutex.Lock()
+	defer func() {
+		t.mutex.Unlock()
+	}()
+
+	// if a value has been received from this readyChannel, return that value
+	if t.receivedYet {
+		return t.firstValue
+	}
+	// otherwise, this is the first time Receive is called
+	// block until the first value is ready in the channel, which will either be from t.Send() or the timeout
+	value := <- t.ch
+
+	// set t.firstValue to true so that subsequent t.Receive() will return value immediately
+	t.receivedYet = true
+	t.firstValue = value
+	return value
+}
 
 // Do ch<-value if the channel is ready to receive a value,
 // otherwise do nothing
@@ -21,16 +80,18 @@ func TrySend(ch chan<- bool, value bool) {
 	}
 }
 
-// Block until an input was received from each channel in chans,
-// then send combined <- chans0 && chans1 && chans2...
-func CombineBoolChannels(chans []<-chan bool, combined chan<- bool) {
+// Block until an input was received from each channel in inputChannels,
+// then send output <- input0 && input 1 && input2...
+func CombineReadyChannels(inputChannels []readyChannel, outputChannel readyChannel) {
 	output := true
-	for _, ch := range chans {
-		if !<-ch {
+	for _, ch := range inputChannels {
+		// Block until able to receive from each channel,
+		// if any are false, then the output is false
+		if !ch.Receive() {
 			output = false
 		}
 	}
-	combined <- output
+	outputChannel.Send(output)
 }
 
 // Gets the IP of the source that made the request, either r.RemoteAddr,
