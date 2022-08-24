@@ -264,18 +264,20 @@ func (pc *PodCreator) applyCreatePodVolumes(targetPodObject *apiv1.Pod) error {
 // Call the kubernetes API for creation of the PodCreator's targetPod
 // Create and return a managed.Pod object corresponding to the created pod
 // Use the ready channel to let the parent know when the pod's start jobs are complete
-func (pc *PodCreator) CreatePod(ready chan<- bool) (managed.Pod, error) {
+func (pc *PodCreator) CreatePod(ready *util.ReadyChannel) (managed.Pod, error) {
 	var pod managed.Pod
 	if pc.targetPod == nil {
 		return pod, errors.New("PodCreater wasn't initialized with a targetPod, cannot create empty target.")
 	}
 
-	storageReady := make(chan bool, 1)
+	storageReady := util.NewReadyChannel(pc.client.TimeoutCreate)
 	if pc.requiresUserStorage() {
 		pc.ensureUserStorageExists(storageReady)
+	} else {
+		storageReady.Send(true)
 	}
 
-	podReady := make(chan bool, 1)
+	podReady := util.NewReadyChannel(pc.client.TimeoutCreate)
 	go pc.client.WatchCreatePod(pc.targetPod.Name, podReady)
 	createdPod, err := pc.client.CreatePod(pc.targetPod)
 	if err != nil {
@@ -283,7 +285,7 @@ func (pc *PodCreator) CreatePod(ready chan<- bool) (managed.Pod, error) {
 	}
 	pod = managed.NewPod(createdPod, pc.client)
 
-	startJobWaitChans := make([]<-chan bool, 2)
+	startJobWaitChans := make([]*util.ReadyChannel, 2)
 	startJobWaitChans[0] = storageReady
 	startJobWaitChans[1] = podReady
 
@@ -303,10 +305,10 @@ func (pc *PodCreator) requiresUserStorage() bool {
 }
 
 // Check that the PV and PVC for the user's /tank/storage directory exist if required
-func (pc *PodCreator) ensureUserStorageExists(ready chan<- bool) error {
+func (pc *PodCreator) ensureUserStorageExists(ready *util.ReadyChannel) error {
 	listOptions := pc.user.GetStorageListOptions()
-	PVready := make(chan bool, 1)
-	PVCready := make(chan bool, 1)
+	PVready := util.NewReadyChannel(pc.client.TimeoutCreate)
+	PVCready := util.NewReadyChannel(pc.client.TimeoutCreate)
 	PVList, err := pc.client.ListPV(listOptions)
 	if err != nil {
 		return err
@@ -320,7 +322,7 @@ func (pc *PodCreator) ensureUserStorageExists(ready chan<- bool) error {
 		}
 		fmt.Printf("CREATED PV: %s\n", createdPV.Name)
 	} else {
-		PVready <- true
+		PVready.Send(true)
 	}
 	PVCList, err := pc.client.ListPVC(listOptions)
 	if err != nil {
@@ -335,8 +337,8 @@ func (pc *PodCreator) ensureUserStorageExists(ready chan<- bool) error {
 		}
 		fmt.Printf("CREATED PVC: %s\n", createdPVC.Name)
 	} else {
-		PVCready <- true
+		PVCready.Send(true)
 	}
-	go util.CombineBoolChannels([]<-chan bool{PVready, PVCready}, ready)
+	go util.CombineReadyChannels([]*util.ReadyChannel{PVready, PVCready}, ready)
 	return nil
 }

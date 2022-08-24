@@ -236,9 +236,7 @@ func (p *Pod) GetPodInfo() PodInfo {
 	podInfo.Status = fmt.Sprintf("%s:%s", p.Object.Status.Phase, startTimeStr)
 
 	err := p.loadPodCache()
-	if err != nil {
-		fmt.Printf("Error while loading tokens for pod %s: %s\n", p.Object.Name, err.Error())
-	} else {
+	if err == nil {
 		podInfo.Tokens = p.cache.Tokens
 		podInfo.OtherResourceInfo = p.cache.OtherResourceInfo
 	}
@@ -423,13 +421,12 @@ func (p *Pod) WatchForReady() {
 // then if each input is true, attempt to perform all start jobs.
 // send true into finishedStartJobs when all jobs finish successfully,
 // or send false if any step fails
-func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []<-chan bool, finishedStartJobs chan<- bool) {
-	ready := make(chan bool, 1)
+func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, finishedStartJobs *util.ReadyChannel) {
 	// block this function until a result is read from each channel in requiredToStartJobs
-	util.CombineBoolChannels(requiredToStartJobs, ready)
-	if !(<-ready) {
+	ready := util.ReceiveReadyChannels(requiredToStartJobs)
+	if !ready {
 		fmt.Printf("Pod %s, related services, and/or user storage didn't reach ready state. Start jobs not attempted.\n", p.Object.Name)
-		util.TrySend(finishedStartJobs, false)
+		finishedStartJobs.Send(false)
 		return
 	}
 
@@ -442,13 +439,13 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []<-chan bool, finishedS
 	err := p.savePodCache()
 	if err != nil {
 		fmt.Printf("Failed to save pod cache for pod %s: %s\n", p.Object.Name, err.Error())
-		util.TrySend(finishedStartJobs, false)
+		finishedStartJobs.Send(false)
 		return
 	}
 
 	// TODO ingress
 
-	util.TrySend(finishedStartJobs, true)
+	finishedStartJobs.Send(true)
 }
 
 // for each pod.metadata.annotations[key]=="copyForFrontend",
@@ -514,11 +511,10 @@ func (p *Pod) copyToken(key string) error {
 // Start the ssh service required by this pod
 func (p *Pod) startSshService() error {
 	// TODO could add a check here to delete an orphaned service with the name that will be created here
-	service, err := p.Client.CreateService(p.getTargetSshService())
+	_, err := p.Client.CreateService(p.getTargetSshService())
 	if err != nil {
 		return err
 	}
-	fmt.Printf("DEBUG: Here is a service right after creation. Does it have a port listed? %+v\n", service)
 	return nil
 }
 

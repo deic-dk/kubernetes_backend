@@ -9,6 +9,7 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/podcreator"
+	"github.com/deic.dk/user_pods_k8s_backend/util"
 )
 
 type GetPodsRequest struct {
@@ -107,7 +108,7 @@ func (s *Server) ServeGetPods(w http.ResponseWriter, r *http.Request) {
 // Makes a PodCreator to request that kubernetes create the pod.
 // Returns the pod's name without error if the request was made without error,
 // Then quietly waits for the pod to reach Ready state and runs start jobs.
-func (s *Server) createPod(request CreatePodRequest, finished chan<- bool) (CreatePodResponse, error) {
+func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel) (CreatePodResponse, error) {
 	var response CreatePodResponse
 	// make podCreator
 	creator, err := podcreator.NewPodCreator(
@@ -138,7 +139,7 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	request.RemoteIP = getRemoteIP(r)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	finished := make(chan bool, 1)
+	finished := util.NewReadyChannel(s.Client.TimeoutCreate)
 	response, err := s.createPod(request, finished)
 
 	var status int
@@ -155,9 +156,8 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 
 	go func() {
-		success := <-finished
+		success := finished.Receive()
 		fmt.Printf("Pod %s reached ready %+v\n", response.PodName, success)
-		close(finished)
 	}()
 }
 

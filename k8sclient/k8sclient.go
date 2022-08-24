@@ -21,8 +21,8 @@ import (
 type K8sClient struct {
 	config        *rest.Config
 	clientset     *kubernetes.Clientset
-	timeoutDelete time.Duration
-	timeoutCreate time.Duration
+	TimeoutDelete time.Duration
+	TimeoutCreate time.Duration
 	Namespace     string
 	TokenDir      string
 	PublicIP      string
@@ -45,8 +45,8 @@ func NewK8sClient() *K8sClient {
 		clientset: clientset,
 		// TODO figure out how to get the namespace automatically from within the pod where this runs
 		Namespace:     "sciencedata-dev",
-		timeoutDelete: 90 * time.Second,
-		timeoutCreate: 90 * time.Second,
+		TimeoutDelete: 90 * time.Second,
+		TimeoutCreate: 90 * time.Second,
 		TokenDir:      "/tmp/tokens",
 		// TODO set this with an external config file instead of hardcoding
 		PublicIP: "130.226.137.130",
@@ -56,10 +56,9 @@ func NewK8sClient() *K8sClient {
 // Set up a watcher to pass to signalFunc, which should ch<-true when the desired event occurs
 func (c *K8sClient) WatchFor(
 	name string,
-	timeout time.Duration,
 	resourceType string,
-	signalFunc func(watch.Interface, chan<- bool),
-	ch chan<- bool,
+	signalFunc func(watch.Interface, *util.ReadyChannel),
+	ch *util.ReadyChannel,
 ) {
 	listOptions := metav1.ListOptions{FieldSelector: fmt.Sprintf("metadata.name=%s", name)}
 	var err error
@@ -78,21 +77,22 @@ func (c *K8sClient) WatchFor(
 		err = errors.New("Unsupported resource type for watcher")
 	}
 	if err != nil {
-		util.TrySend(ch, false)
+		ch.Send(false)
 		fmt.Printf("Error in WatchFor: %s\n", err.Error())
 		return
 	}
-	// In a goroutine, sleep for the timeout duration and then push ch<-false
-	time.AfterFunc(timeout, func() {
+	// In a goroutine, wait until there's a value in the channel, and then stop the watcher.
+	// This will ensure that either a successful event or the timeout will terminate signalFunc
+	go func() {
+		ch.Receive()
 		watcher.Stop()
-		util.TrySend(ch, false)
-	})
+	}()
 	// In this goroutine, call the function to ch<-true when the desired event occurs
 	signalFunc(watcher, ch)
 }
 
 // Push ch<-true when watcher receives an event for a ready pod
-func signalPodReady(watcher watch.Interface, ch chan<- bool) {
+func signalPodReady(watcher watch.Interface, ch *util.ReadyChannel) {
 	// Run this loop every time an event is ready in the watcher channel
 	for event := range watcher.ResultChan() {
 		// the event.Object is only sure to be an apiv1.Pod if the event.Type is Modified
@@ -105,8 +105,7 @@ func signalPodReady(watcher watch.Interface, ch chan<- bool) {
 					// If the pod is ready, then stop watching, so the event loop will terminate
 					if condition.Status == apiv1.ConditionTrue {
 						fmt.Printf("READY POD: %s\n", eventPod.Name)
-						watcher.Stop()
-						util.TrySend(ch, true)
+						ch.Send(true)
 					}
 					break
 				}
@@ -116,36 +115,33 @@ func signalPodReady(watcher watch.Interface, ch chan<- bool) {
 }
 
 // Push ch<-true when the object watcher is watching is deleted
-func signalDeleted(watcher watch.Interface, ch chan<- bool) {
+func signalDeleted(watcher watch.Interface, ch *util.ReadyChannel) {
 	for event := range watcher.ResultChan() {
 		if event.Type == watch.Deleted {
-			watcher.Stop()
-			util.TrySend(ch, true)
+			ch.Send(true)
 		}
 	}
 }
 
 // Push ch<-true when the Persistent Volume is ready
-func signalPVReady(watcher watch.Interface, ch chan<- bool) {
+func signalPVReady(watcher watch.Interface, ch *util.ReadyChannel) {
 	for event := range watcher.ResultChan() {
 		if event.Type == watch.Modified {
 			pv := event.Object.(*apiv1.PersistentVolume)
 			if pv.Status.Phase == apiv1.VolumeAvailable {
-				watcher.Stop()
-				util.TrySend(ch, true)
+				ch.Send(true)
 			}
 		}
 	}
 }
 
 // Push ch<-true when when Persistent Volume Claim is bound
-func signalPVCReady(watcher watch.Interface, ch chan<- bool) {
+func signalPVCReady(watcher watch.Interface, ch *util.ReadyChannel) {
 	for event := range watcher.ResultChan() {
 		if event.Type == watch.Modified {
 			pvc := event.Object.(*apiv1.PersistentVolumeClaim)
 			if pvc.Status.Phase == apiv1.ClaimBound {
-				watcher.Stop()
-				util.TrySend(ch, true)
+				ch.Send(true)
 			}
 		}
 	}
@@ -159,16 +155,16 @@ func (c *K8sClient) DeletePod(name string) error {
 	return c.clientset.CoreV1().Pods(c.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
-func (c *K8sClient) WatchDeletePod(name string, finished chan<- bool) {
-	c.WatchFor(name, c.timeoutDelete, "Pod", signalDeleted, finished)
+func (c *K8sClient) WatchDeletePod(name string, finished *util.ReadyChannel) {
+	c.WatchFor(name, "Pod", signalDeleted, finished)
 }
 
 func (c *K8sClient) CreatePod(target *apiv1.Pod) (*apiv1.Pod, error) {
 	return c.clientset.CoreV1().Pods(c.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
-func (c *K8sClient) WatchCreatePod(name string, ready chan<- bool) {
-	c.WatchFor(name, c.timeoutCreate, "Pod", signalPodReady, ready)
+func (c *K8sClient) WatchCreatePod(name string, ready *util.ReadyChannel) {
+	c.WatchFor(name, "Pod", signalPodReady, ready)
 }
 
 func (c *K8sClient) ListPVC(opt metav1.ListOptions) (*apiv1.PersistentVolumeClaimList, error) {
@@ -179,16 +175,16 @@ func (c *K8sClient) DeletePVC(name string) error {
 	return c.clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
-func (c *K8sClient) WatchDeletePVC(name string, finished chan<- bool) {
-	c.WatchFor(name, c.timeoutDelete, "PVC", signalDeleted, finished)
+func (c *K8sClient) WatchDeletePVC(name string, finished *util.ReadyChannel) {
+	c.WatchFor(name, "PVC", signalDeleted, finished)
 }
 
 func (c *K8sClient) CreatePVC(target *apiv1.PersistentVolumeClaim) (*apiv1.PersistentVolumeClaim, error) {
 	return c.clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
-func (c *K8sClient) WatchCreatePVC(name string, ready chan<- bool) {
-	c.WatchFor(name, c.timeoutCreate, "PVC", signalPVCReady, ready)
+func (c *K8sClient) WatchCreatePVC(name string, ready *util.ReadyChannel) {
+	c.WatchFor(name, "PVC", signalPVCReady, ready)
 }
 
 func (c *K8sClient) ListPV(opt metav1.ListOptions) (*apiv1.PersistentVolumeList, error) {
@@ -199,16 +195,16 @@ func (c *K8sClient) DeletePV(name string) error {
 	return c.clientset.CoreV1().PersistentVolumes().Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
-func (c *K8sClient) WatchDeletePV(name string, finished chan<- bool) {
-	c.WatchFor(name, c.timeoutDelete, "PV", signalDeleted, finished)
+func (c *K8sClient) WatchDeletePV(name string, finished *util.ReadyChannel) {
+	c.WatchFor(name, "PV", signalDeleted, finished)
 }
 
 func (c *K8sClient) CreatePV(target *apiv1.PersistentVolume) (*apiv1.PersistentVolume, error) {
 	return c.clientset.CoreV1().PersistentVolumes().Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
-func (c *K8sClient) WatchCreatePV(name string, ready chan<- bool) {
-	c.WatchFor(name, c.timeoutCreate, "PV", signalPVReady, ready)
+func (c *K8sClient) WatchCreatePV(name string, ready *util.ReadyChannel) {
+	c.WatchFor(name, "PV", signalPVReady, ready)
 }
 
 func (c *K8sClient) ListServices(opt metav1.ListOptions) (*apiv1.ServiceList, error) {
@@ -219,12 +215,12 @@ func (c *K8sClient) CreateService(target *apiv1.Service) (*apiv1.Service, error)
 	return c.clientset.CoreV1().Services(c.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
-func (c *K8sClient) DeleteService(name string, finished chan<- bool) error {
+func (c *K8sClient) DeleteService(name string, finished *util.ReadyChannel) error {
 	return c.clientset.CoreV1().Services(c.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
-func (c *K8sClient) WatchDeleteService(name string, finished chan<- bool) {
-	c.WatchFor(name, c.timeoutDelete, "SVC", signalDeleted, finished)
+func (c *K8sClient) WatchDeleteService(name string, finished *util.ReadyChannel) {
+	c.WatchFor(name, "SVC", signalDeleted, finished)
 }
 
 // call a bash command inside of a pod, with the command given as a []string of bash words
