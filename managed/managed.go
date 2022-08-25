@@ -346,7 +346,7 @@ func (p *Pod) getSshPort() (string, error) {
 	if sshPort == 0 {
 		return "", errors.New("Ssh service nodePort not found")
 	}
-	return string(sshPort), nil
+	return fmt.Sprintf("%d", sshPort), nil
 }
 
 // fill p.cache.OtherResourceInfo with information about other k8s resources relevant to the pod
