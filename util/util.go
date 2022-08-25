@@ -101,7 +101,7 @@ func ReceiveReadyChannels(inputChannels []*ReadyChannel) bool {
 
 // Gets the IP of the source that made the request, either r.RemoteAddr,
 // or if it was forwarded, the first address in the X-Forwarded-For header
-func getRemoteIP(r *http.Request) string {
+func GetRemoteIP(r *http.Request) string {
 	// When running this behind caddy, r.RemoteAddr is just the caddy process's IP addr,
 	// and X-Forward-For header should contain the silo's IP address.
 	// This may be different with ingress.

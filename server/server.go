@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
+	"sync"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
@@ -32,6 +32,15 @@ type CreatePodResponse struct {
 	PodName string `json:"pod_name"`
 }
 
+type WatchCreatePodRequest struct {
+	PodName string `json:"pod_name"`
+	UserID  string `json:"user_id"`
+}
+
+type WatchCreatePodResponse struct {
+	Ready bool `json:"ready"`
+}
+
 type DeletePodRequest struct {
 	UserID   string `json:"user_id"`
 	PodName  string `json:"pod_name"`
@@ -53,16 +62,34 @@ type DeleteAllPodsResponse struct {
 
 type Server struct {
 	Client       k8sclient.K8sClient
-	CreatingPods map[string]struct{}
+	CreatingPods map[string]*util.ReadyChannel
 	DeletingPods map[string]struct{}
+	mutex        *sync.Mutex
 }
 
 func New(client k8sclient.K8sClient) *Server {
+	var m sync.Mutex
 	return &Server{
 		Client:       client,
-		CreatingPods: make(map[string]struct{}),
+		CreatingPods: make(map[string]*util.ReadyChannel),
 		DeletingPods: make(map[string]struct{}),
+		mutex:        &m,
 	}
+}
+
+func (s *Server) AddToCreatingPods(podName string, finished *util.ReadyChannel) {
+	// Thread-safe add podName to the map of creating pods
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.CreatingPods[podName] = finished
+
+	// Then watch for the finished signal, and once finished, remove podName from the map
+	go func() {
+		finished.Receive()
+		s.mutex.Lock()
+		defer s.mutex.Unlock()
+		delete(s.CreatingPods, podName)
+	}()
 }
 
 // Fills in a getPodsResponse with information about all the pods owned by the user.
@@ -87,7 +114,7 @@ func (s *Server) ServeGetPods(w http.ResponseWriter, r *http.Request) {
 	var request GetPodsRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
-	request.RemoteIP = getRemoteIP(r)
+	request.RemoteIP = util.GetRemoteIP(r)
 	fmt.Printf("getPods request: %+v\n", request)
 
 	// get the list of pods
@@ -126,6 +153,7 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 	if err != nil {
 		return response, err
 	}
+	s.AddToCreatingPods(pod.Object.Name, finished)
 	response.PodName = pod.Object.Name
 	return response, nil
 }
@@ -136,7 +164,7 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	var request CreatePodRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
-	request.RemoteIP = getRemoteIP(r)
+	request.RemoteIP = util.GetRemoteIP(r)
 	fmt.Printf("createPod request: %+v\n", request)
 
 	finished := util.NewReadyChannel(s.Client.TimeoutCreate)
@@ -161,20 +189,24 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// Server utility functions
-
-// Gets the IP of the source that made the request, either r.RemoteAddr,
-// or if it was forwarded, the first address in the X-Forwarded-For header
-func getRemoteIP(r *http.Request) string {
-	// When running this behind caddy, r.RemoteAddr is just the caddy process's IP addr,
-	// and X-Forward-For header should contain the silo's IP address.
-	// This may be different with ingress.
-	var siloIP string
-	value, forwarded := r.Header["X-Forwarded-For"]
-	if forwarded {
-		siloIP = value[0]
-	} else {
-		siloIP = r.RemoteAddr
+func (s *Server) watchCreatePod(request WatchCreatePodRequest) bool {
+	readyChannel, exists := s.CreatingPods[request.PodName]
+	if !exists {
+		return true
 	}
-	return regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(siloIP)
+	return readyChannel.Receive()
+}
+
+func (s *Server) ServeWatchCreatePod(w http.ResponseWriter, r *http.Request) {
+	var request WatchCreatePodRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	fmt.Printf("watchCreatePod request %+v\n", request)
+
+	response := WatchCreatePodResponse{}
+	response.Ready = s.watchCreatePod(request)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
