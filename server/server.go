@@ -125,6 +125,17 @@ func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
 	}
 	for _, pod := range podList {
 		podInfo := pod.GetPodInfo()
+		// If this podName is in the server's map of creating/deleting pods,
+		// then overwrite the podInfo.Status
+		_, podCreating := s.CreatingPods[podInfo.PodName]
+		if podCreating {
+			podInfo.Status = "Creating"
+		} else {
+			_, podDeleting := s.DeletingPods[podInfo.PodName]
+			if podDeleting {
+				podInfo.Status = "Deleting"
+			}
+		}
 		response = append(response, podInfo)
 	}
 	return response, nil
