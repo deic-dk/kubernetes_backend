@@ -53,6 +53,15 @@ type DeletePodResponse struct {
 	PodName string `json:"pod_name"`
 }
 
+type WatchDeletePodRequest struct {
+	PodName string `json:"pod_name"`
+	UserID  string `json:"user_id"`
+}
+
+type WatchDeletePodResponse struct {
+	Ready bool `json:"ready"`
+}
+
 type DeleteAllPodsRequest struct {
 	UserID   string `json:"user_id"`
 	RemoteIP string
@@ -264,5 +273,27 @@ func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
 	// write the response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) watchDeletePod(request WatchDeletePodRequest) bool {
+	readyChannel, exists := s.DeletingPods[request.PodName]
+	if !exists {
+		return true
+	}
+	return readyChannel.Receive()
+}
+
+func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
+	var request WatchDeletePodRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	fmt.Printf("watchDeletePod request %+v\n", request)
+
+	response := WatchCreatePodResponse{}
+	response.Ready = s.watchDeletePod(request)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 }

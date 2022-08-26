@@ -16,6 +16,7 @@ func main() {
 	http.HandleFunc("/create_pod", server.ServeCreatePod)
 	http.HandleFunc("/watch_create_pod", server.ServeWatchCreatePod)
 	http.HandleFunc("/delete_pod", server.ServeDeletePod)
+	http.HandleFunc("/watch_delete_pod", server.ServeWatchDeletePod)
 
 	fmt.Printf("Listening\n")
 	err := http.ListenAndServe(":80", nil)
