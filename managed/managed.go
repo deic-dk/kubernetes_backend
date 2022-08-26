@@ -184,20 +184,8 @@ type Pod struct {
 }
 
 func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
-	var owner User
-	user, hasUser := existingPod.ObjectMeta.Labels["user"]
-	if !hasUser {
-		owner = NewUser("", "", client)
-	} else {
-		var userStr string
-		domain, hasDomain := existingPod.ObjectMeta.Labels["domain"]
-		if hasDomain {
-			userStr = fmt.Sprintf("%s@%s", user, domain)
-		} else {
-			userStr = user
-		}
-		owner = NewUser(userStr, "", client)
-	}
+	userID := util.GetUserIDFromLabels(existingPod.ObjectMeta.Labels)
+	owner := NewUser(userID, "", client)
 	cache := &podCache{
 		Tokens:            make(map[string]string),
 		OtherResourceInfo: make(map[string]string),
@@ -415,6 +403,42 @@ func (p *Pod) CheckState() {
 
 func (p *Pod) WatchForReady() {
 	// watch for pod status
+}
+
+func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.ReadyChannel) {
+	// wait for the signal that delete jobs can begin
+	// If ready.Receive() is false (due to timeout or failure),
+	// then signal false on finished channel, and do not attempt delete jobs
+	if !ready.Receive() {
+		finished.Send(false)
+		return
+	}
+
+	// Delete the cache file if it exists
+	err := os.Remove(p.getCacheFile())
+	if err != nil {
+		// if there was an error other than that the file didn't exist, log it
+		if !os.IsNotExist(err) {
+			fmt.Printf("Error while deleting cache for pod %s: %s\n", p.Object.Name, err.Error())
+		}
+	}
+
+	// Delete all of the pod's related services
+	serviceList, err := p.ListServices()
+	if len(serviceList.Items) > 0 {
+		deleteChannels := make([]*util.ReadyChannel, len(serviceList.Items))
+		// For each service, call for deletion and add a watcher channel to the list of deleteChannels
+		for i, service := range serviceList.Items {
+			ch := util.NewReadyChannel(p.Client.TimeoutDelete)
+			deleteChannels[i] = ch
+			go p.Client.WatchDeleteService(service.Name, ch)
+			p.Client.DeleteService(service.Name)
+		}
+		// Then only signal finished when each service has been deleted successfully
+		util.CombineReadyChannels(deleteChannels, finished)
+	} else {
+		finished.Send(true)
+	}
 }
 
 // Wait until each channel in requiredToStartJobs has an input,

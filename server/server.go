@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/podcreator"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
+	"github.com/deic.dk/user_pods_k8s_backend/poddeleter"
 )
 
 type GetPodsRequest struct {
@@ -63,7 +65,7 @@ type DeleteAllPodsResponse struct {
 type Server struct {
 	Client       k8sclient.K8sClient
 	CreatingPods map[string]*util.ReadyChannel
-	DeletingPods map[string]struct{}
+	DeletingPods map[string]*util.ReadyChannel
 	mutex        *sync.Mutex
 }
 
@@ -72,23 +74,34 @@ func New(client k8sclient.K8sClient) *Server {
 	return &Server{
 		Client:       client,
 		CreatingPods: make(map[string]*util.ReadyChannel),
-		DeletingPods: make(map[string]struct{}),
+		DeletingPods: make(map[string]*util.ReadyChannel),
 		mutex:        &m,
 	}
 }
 
-func (s *Server) AddToCreatingPods(podName string, finished *util.ReadyChannel) {
+// Add an entry to s.CreatingPods or s.DeletingPods with `podName` as the key and `finished` as the value.
+// As soon as a value is ready in finished, the entry will be removed from the map.
+// `creating` should be true if adding to s.CreatingPods and false if adding to s.DeletingPods.
+func (s *Server) AddToPodWatchMaps(podName string, finished *util.ReadyChannel, creating bool) {
 	// Thread-safe add podName to the map of creating pods
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.CreatingPods[podName] = finished
+	if creating {
+		s.CreatingPods[podName] = finished
+	} else {
+		s.DeletingPods[podName] = finished
+	}
 
 	// Then watch for the finished signal, and once finished, remove podName from the map
 	go func() {
 		finished.Receive()
 		s.mutex.Lock()
 		defer s.mutex.Unlock()
-		delete(s.CreatingPods, podName)
+		if creating {
+			delete(s.CreatingPods, podName)
+		} else {
+			delete(s.DeletingPods, podName)
+		}
 	}()
 }
 
@@ -153,7 +166,7 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 	if err != nil {
 		return response, err
 	}
-	s.AddToCreatingPods(pod.Object.Name, finished)
+	s.AddToPodWatchMaps(pod.Object.Name, finished, true)
 	response.PodName = pod.Object.Name
 	return response, nil
 }
@@ -208,5 +221,48 @@ func (s *Server) ServeWatchCreatePod(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel) error {
+	deleter, err := poddeleter.NewPodDeleter(request.PodName, request.UserID, s.Client)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Error starting pod deletion for %s: %s", request.PodName, err.Error()))
+	}
+	err = deleter.DeletePod(finished)
+	if err != nil {
+		return err
+	}
+	s.AddToPodWatchMaps(request.PodName, finished, false)
+
+	// TODO clean user storage if they have no other pods
+
+	return nil
+}
+
+func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
+	// Parse the POSTed request JSON and log the request
+	var request DeletePodRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	request.RemoteIP = util.GetRemoteIP(r)
+	fmt.Printf("deletePod request: %+v\n", request)
+
+	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
+	err := s.deletePod(request, finished)
+	var status int
+	var response DeletePodResponse
+	if err != nil {
+		status = http.StatusBadRequest
+		response.PodName = ""
+		fmt.Printf("Error: %s\n", err.Error())
+	} else {
+		status = http.StatusOK
+		response.PodName = request.PodName
+	}
+
+	// write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
 }

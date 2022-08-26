@@ -153,3 +153,20 @@ func NeedsSshService(pod *apiv1.Pod) bool {
 	}
 	return listensSsh
 }
+
+func GetUserIDFromLabels(labels map[string]string) string {
+	user, hasUser := labels["user"]
+	if !hasUser {
+		return ""
+	}
+	if user == "" {
+		return ""
+	}
+	domain, hasDomain := labels["domain"]
+	if hasDomain {
+		if domain != "" {
+			return fmt.Sprintf("%s@%s", user, domain)
+		}
+	}
+	return user
+}

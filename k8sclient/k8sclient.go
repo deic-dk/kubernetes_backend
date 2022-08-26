@@ -215,7 +215,7 @@ func (c *K8sClient) CreateService(target *apiv1.Service) (*apiv1.Service, error)
 	return c.clientset.CoreV1().Services(c.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
-func (c *K8sClient) DeleteService(name string, finished *util.ReadyChannel) error {
+func (c *K8sClient) DeleteService(name string) error {
 	return c.clientset.CoreV1().Services(c.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
