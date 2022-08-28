@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -152,6 +153,40 @@ func (u *User) GetTargetStoragePVC() *apiv1.PersistentVolumeClaim {
 			},
 		},
 	}
+}
+
+// Delete the user's storage PV and PVC
+func (u *User) CleanUserStorage(finished *util.ReadyChannel) error {
+	pvName := u.GetStoragePVName()
+	// Start a watcher for PV deletion,
+	pvChan := util.NewReadyChannel(u.Client.TimeoutDelete)
+	go u.Client.WatchDeletePV(pvName, pvChan)
+	// Then try to delete the PV.
+	err := u.Client.DeletePV(pvName)
+	if err != nil {
+		// If the error message is that the PV is not found, go ahead and signal that it was deleted.
+		if regexp.MustCompile(fmt.Sprintf("\"%s\" not found", pvName)).MatchString(err.Error()) {
+			pvChan.Send(true)
+		} else { // Otherwise, there's a problem that should be handled.
+			return err
+		}
+	}
+
+	// Repeat for the PVC
+	pvcChan := util.NewReadyChannel(u.Client.TimeoutDelete)
+	go u.Client.WatchDeletePVC(pvName, pvcChan)
+	err = u.Client.DeletePVC(pvName)
+	if err != nil {
+		if regexp.MustCompile(fmt.Sprintf("\"%s\" not found", pvName)).MatchString(err.Error()) {
+			pvcChan.Send(true)
+		} else {
+			return err
+		}
+	}
+
+	// Then combine the channels so `finished` will see when both PV and PVC are deleted
+	util.CombineReadyChannels([]*util.ReadyChannel{pvChan, pvcChan}, finished)
+	return nil
 }
 
 // Struct for data to cache for quick getPods responses

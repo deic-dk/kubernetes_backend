@@ -12,7 +12,7 @@ import (
 
 type PodDeleter struct {
 	podName string
-	pod managed.Pod
+	Pod managed.Pod
 	userID string
 	client k8sclient.K8sClient
 }
@@ -41,7 +41,7 @@ func (pd *PodDeleter) initPodObject() error {
 	if pod.Owner.UserID != pd.userID {
 		return errors.New(fmt.Sprintf("Pod %s not owned by user %s", pd.podName, pd.userID))
 	}
-	pd.pod = pod
+	pd.Pod = pod
 	return nil
 }
 
@@ -52,6 +52,6 @@ func (pd *PodDeleter) DeletePod(finished *util.ReadyChannel) error {
 	if err != nil {
 		return err
 	}
-	go pd.pod.RunDeleteJobsWhenReady(podDeleted, finished)
+	go pd.Pod.RunDeleteJobsWhenReady(podDeleted, finished)
 	return nil
 }

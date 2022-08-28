@@ -244,6 +244,24 @@ func (s *Server) ServeWatchCreatePod(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func (s *Server) userHasRemainingPods(u managed.User) bool {
+	podList, err := u.ListPods()
+	if err != nil {
+		fmt.Printf("Error, couldn't list pods for user %s: %s\n", u.UserID, err.Error())
+		return false
+	}
+	// For each of the user's pods,
+	for _, pod := range podList {
+		// check whether it's being deleted.
+		_, inDeletingMap := s.DeletingPods[pod.Object.Name]
+		// If there is a pod that is not being deleted, then go ahead and return true
+		if !inDeletingMap {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel) error {
 	deleter, err := poddeleter.NewPodDeleter(request.PodName, request.UserID, s.Client)
 	if err != nil {
@@ -255,7 +273,20 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 	}
 	s.AddToPodWatchMaps(request.PodName, finished, false)
 
-	// TODO clean user storage if they have no other pods
+	if !s.userHasRemainingPods(deleter.Pod.Owner) {
+		cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
+		err = deleter.Pod.Owner.CleanUserStorage(cleanedStorage)
+		if err != nil {
+			fmt.Printf("Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
+		}
+		go func() {
+			if cleanedStorage.Receive() {
+				fmt.Printf("DELETED PV and PVC %s\n", deleter.Pod.Owner.GetStoragePVName())
+			} else {
+				fmt.Printf("WARNING: did not successfully clean user storage for %s\n", deleter.Pod.Owner.UserID)
+			}
+		}()
+	}
 
 	return nil
 }
