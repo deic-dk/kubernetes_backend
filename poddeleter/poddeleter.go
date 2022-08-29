@@ -47,7 +47,14 @@ func (pd *PodDeleter) initPodObject() error {
 
 func (pd *PodDeleter) DeletePod(finished *util.ReadyChannel) error {
 	podDeleted := util.NewReadyChannel(pd.client.TimeoutDelete)
-	go pd.client.WatchDeletePod(pd.podName, podDeleted)
+	go func() {
+		pd.client.WatchDeletePod(pd.podName, podDeleted)
+		if podDeleted.Receive() {
+			fmt.Printf("Deleted pod %s\n", pd.podName)
+		} else {
+			fmt.Printf("Warning: failed to delete pod %s\n", pd.podName)
+		}
+	}()
 	err := pd.client.DeletePod(pd.podName)
 	if err != nil {
 		return err

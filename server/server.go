@@ -217,8 +217,12 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 
 	go func() {
-		success := finished.Receive()
-		fmt.Printf("Pod %s reached ready %+v\n", response.PodName, success)
+		if finished.Receive() {
+			fmt.Printf("Completed start jobs for Pod %s\n", response.PodName)
+		} else {
+			fmt.Printf("Warning: failed to create pod %s or complete start jobs\n", response.PodName)
+			// TODO attempt to clean up the failed pod
+		}
 	}()
 }
 
@@ -277,15 +281,9 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 		cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
 		err = deleter.Pod.Owner.CleanUserStorage(cleanedStorage)
 		if err != nil {
-			fmt.Printf("Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
+			fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
 		}
-		go func() {
-			if cleanedStorage.Receive() {
-				fmt.Printf("DELETED PV and PVC %s\n", deleter.Pod.Owner.GetStoragePVName())
-			} else {
-				fmt.Printf("WARNING: did not successfully clean user storage for %s\n", deleter.Pod.Owner.UserID)
-			}
-		}()
+		// TODO should `cleanedStorage`'s result be multiplied into `finished`?
 	}
 
 	return nil

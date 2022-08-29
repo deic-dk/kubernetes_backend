@@ -104,7 +104,6 @@ func signalPodReady(watcher watch.Interface, ch *util.ReadyChannel) {
 				if condition.Type == apiv1.PodReady {
 					// If the pod is ready, then stop watching, so the event loop will terminate
 					if condition.Status == apiv1.ConditionTrue {
-						fmt.Printf("READY POD: %s\n", eventPod.Name)
 						ch.Send(true)
 					}
 					break

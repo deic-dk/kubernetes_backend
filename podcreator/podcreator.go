@@ -278,7 +278,15 @@ func (pc *PodCreator) CreatePod(ready *util.ReadyChannel) (managed.Pod, error) {
 	}
 
 	podReady := util.NewReadyChannel(pc.client.TimeoutCreate)
-	go pc.client.WatchCreatePod(pc.targetPod.Name, podReady)
+	go func() {
+		pc.client.WatchCreatePod(pc.targetPod.Name, podReady)
+		if podReady.Receive() {
+			fmt.Printf("Ready pod %s\n", pc.targetPod.Name)
+		} else {
+			fmt.Printf("Warning: pod %s didn't reach ready state\n", pc.targetPod.Name)
+		}
+	}()
+
 	createdPod, err := pc.client.CreatePod(pc.targetPod)
 	if err != nil {
 		return pod, errors.New(fmt.Sprintf("Call to create pod %s failed: %s", pc.targetPod.Name, err.Error()))
@@ -315,27 +323,40 @@ func (pc *PodCreator) ensureUserStorageExists(ready *util.ReadyChannel) error {
 	}
 	if len(PVList.Items) == 0 {
 		targetPV := pc.user.GetTargetStoragePV()
-		go pc.client.WatchCreatePV(targetPV.Name, PVready)
-		createdPV, err := pc.client.CreatePV(targetPV)
+		go func() {
+			pc.client.WatchCreatePV(targetPV.Name, PVready)
+			if PVready.Receive() {
+				fmt.Printf("Ready PV %s\n", targetPV.Name)
+			} else {
+				fmt.Printf("Warning PV %s didn't reach ready state\n", targetPV.Name)
+			}
+		}()
+		_, err := pc.client.CreatePV(targetPV)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("CREATED PV: %s\n", createdPV.Name)
 	} else {
 		PVready.Send(true)
 	}
+
 	PVCList, err := pc.client.ListPVC(listOptions)
 	if err != nil {
 		return err
 	}
 	if len(PVCList.Items) == 0 {
 		targetPVC := pc.user.GetTargetStoragePVC()
-		go pc.client.WatchCreatePVC(targetPVC.Name, PVCready)
-		createdPVC, err := pc.client.CreatePVC(targetPVC)
+		go func() {
+			pc.client.WatchCreatePVC(targetPVC.Name, PVCready)
+			if PVCready.Receive() {
+				fmt.Printf("Ready PVC %s\n", targetPVC.Name)
+			} else {
+				fmt.Printf("Warning PVC %s didn't reach ready state\n", targetPVC.Name)
+			}
+		}()
+		_, err := pc.client.CreatePVC(targetPVC)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("CREATED PVC: %s\n", createdPVC.Name)
 	} else {
 		PVCready.Send(true)
 	}

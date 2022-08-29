@@ -160,7 +160,14 @@ func (u *User) CleanUserStorage(finished *util.ReadyChannel) error {
 	pvName := u.GetStoragePVName()
 	// Start a watcher for PV deletion,
 	pvChan := util.NewReadyChannel(u.Client.TimeoutDelete)
-	go u.Client.WatchDeletePV(pvName, pvChan)
+	go func() {
+		u.Client.WatchDeletePV(pvName, pvChan)
+		if pvChan.Receive() {
+			fmt.Printf("Deleted PV %s\n", pvName)
+		} else {
+			fmt.Printf("Warning: failed to delete PV %s\n", pvName)
+		}
+	}()
 	// Then try to delete the PV.
 	err := u.Client.DeletePV(pvName)
 	if err != nil {
@@ -174,7 +181,14 @@ func (u *User) CleanUserStorage(finished *util.ReadyChannel) error {
 
 	// Repeat for the PVC
 	pvcChan := util.NewReadyChannel(u.Client.TimeoutDelete)
-	go u.Client.WatchDeletePVC(pvName, pvcChan)
+	go func() {
+		u.Client.WatchDeletePVC(pvName, pvcChan)
+		if pvcChan.Receive() {
+			fmt.Printf("Deleted PVC %s\n", pvName)
+		} else {
+			fmt.Printf("Warning: failed to delete PVC %s\n", pvName)
+		}
+	}()
 	err = u.Client.DeletePVC(pvName)
 	if err != nil {
 		if regexp.MustCompile(fmt.Sprintf("\"%s\" not found", pvName)).MatchString(err.Error()) {
@@ -466,7 +480,14 @@ func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.Re
 		for i, service := range serviceList.Items {
 			ch := util.NewReadyChannel(p.Client.TimeoutDelete)
 			deleteChannels[i] = ch
-			go p.Client.WatchDeleteService(service.Name, ch)
+			go func() {
+				p.Client.WatchDeleteService(service.Name, ch)
+				if ch.Receive() {
+					fmt.Printf("Deleted SVC %s\n", service.Name)
+				} else {
+					fmt.Printf("Warning: failed to delete SVC %s\n", service.Name)
+				}
+			}()
 			p.Client.DeleteService(service.Name)
 		}
 		// Then only signal finished when each service has been deleted successfully
@@ -484,7 +505,7 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 	// block this function until a result is read from each channel in requiredToStartJobs
 	ready := util.ReceiveReadyChannels(requiredToStartJobs)
 	if !ready {
-		fmt.Printf("Pod %s, related services, and/or user storage didn't reach ready state. Start jobs not attempted.\n", p.Object.Name)
+		fmt.Printf("Warning: Pod %s and/or user storage didn't reach ready state. Start jobs not attempted.\n", p.Object.Name)
 		finishedStartJobs.Send(false)
 		return
 	}
@@ -570,10 +591,12 @@ func (p *Pod) copyToken(key string) error {
 // Start the ssh service required by this pod
 func (p *Pod) startSshService() error {
 	// TODO could add a check here to delete an orphaned service with the name that will be created here
-	_, err := p.Client.CreateService(p.getTargetSshService())
+	targetService := p.getTargetSshService()
+	_, err := p.Client.CreateService(targetService)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Created SVC %s\n", targetService.Name)
 	return nil
 }
 
