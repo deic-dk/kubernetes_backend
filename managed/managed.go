@@ -65,7 +65,12 @@ func (u *User) ListPods() ([]Pod, error) {
 	}
 	pods = make([]Pod, len(podList.Items))
 	for i := 0; i < len(podList.Items); i++ {
-		pods[i] = NewPod(&podList.Items[i], u.Client)
+		pod := NewPod(&podList.Items[i], u.Client)
+		if pod.Owner.UserID == u.UserID {
+			pods[i] = pod
+		} else {
+			fmt.Printf("Warning: pod %s has labels matching userID %s, but userID %s was expected\n", pod.Object.Name, pod.Owner.UserID, u.UserID)
+		}
 	}
 	return pods, nil
 }
@@ -160,35 +165,29 @@ func (u *User) CleanUserStorage(finished *util.ReadyChannel) error {
 	pvName := u.GetStoragePVName()
 	// Start a watcher for PV deletion,
 	pvChan := util.NewReadyChannel(u.Client.TimeoutDelete)
-	go func() {
-		u.Client.WatchDeletePV(pvName, pvChan)
-		if pvChan.Receive() {
-			fmt.Printf("Deleted PV %s\n", pvName)
-		} else {
-			fmt.Printf("Warning: failed to delete PV %s\n", pvName)
-		}
-	}()
 	// Then try to delete the PV.
 	err := u.Client.DeletePV(pvName)
+	// If there is an error,
 	if err != nil {
-		// If the error message is that the PV is not found, go ahead and signal that it was deleted.
+		// If the error message is that the PV is not found, that's okay. Signal that the PV is in the desired state.
 		if regexp.MustCompile(fmt.Sprintf("\"%s\" not found", pvName)).MatchString(err.Error()) {
 			pvChan.Send(true)
-		} else { // Otherwise, there's a problem that should be handled.
+		} else { // If the error message is something else, there's a problem that should be handled.
 			return err
 		}
+	} else { // if the delete request was issued successfully, then listen log the result
+		go func() {
+			u.Client.WatchDeletePV(pvName, pvChan)
+			if pvChan.Receive() {
+				fmt.Printf("Deleted PV %s\n", pvName)
+			} else {
+				fmt.Printf("Warning: failed to delete PV %s\n", pvName)
+			}
+		}()
 	}
 
 	// Repeat for the PVC
 	pvcChan := util.NewReadyChannel(u.Client.TimeoutDelete)
-	go func() {
-		u.Client.WatchDeletePVC(pvName, pvcChan)
-		if pvcChan.Receive() {
-			fmt.Printf("Deleted PVC %s\n", pvName)
-		} else {
-			fmt.Printf("Warning: failed to delete PVC %s\n", pvName)
-		}
-	}()
 	err = u.Client.DeletePVC(pvName)
 	if err != nil {
 		if regexp.MustCompile(fmt.Sprintf("\"%s\" not found", pvName)).MatchString(err.Error()) {
@@ -196,6 +195,15 @@ func (u *User) CleanUserStorage(finished *util.ReadyChannel) error {
 		} else {
 			return err
 		}
+	} else {
+		go func() {
+			u.Client.WatchDeletePVC(pvName, pvcChan)
+			if pvcChan.Receive() {
+				fmt.Printf("Deleted PVC %s\n", pvName)
+			} else {
+				fmt.Printf("Warning: failed to delete PVC %s\n", pvName)
+			}
+		}()
 	}
 
 	// Then combine the channels so `finished` will see when both PV and PVC are deleted

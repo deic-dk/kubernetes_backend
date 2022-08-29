@@ -12,9 +12,9 @@ import (
 
 type PodDeleter struct {
 	podName string
-	Pod managed.Pod
-	userID string
-	client k8sclient.K8sClient
+	Pod     managed.Pod
+	userID  string
+	client  k8sclient.K8sClient
 }
 
 func NewPodDeleter(podName string, userID string, client k8sclient.K8sClient) (PodDeleter, error) {
@@ -24,6 +24,10 @@ func NewPodDeleter(podName string, userID string, client k8sclient.K8sClient) (P
 		return deleter, err
 	}
 	return deleter, nil
+}
+
+func NewFromPod(pod managed.Pod) PodDeleter {
+	return PodDeleter{podName: pod.Object.Name, userID: pod.Owner.UserID, client: pod.Client, Pod: pod}
 }
 
 func (pd *PodDeleter) initPodObject() error {

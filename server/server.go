@@ -1,8 +1,8 @@
 package server
 
 import (
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -10,8 +10,8 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/podcreator"
-	"github.com/deic.dk/user_pods_k8s_backend/util"
 	"github.com/deic.dk/user_pods_k8s_backend/poddeleter"
+	"github.com/deic.dk/user_pods_k8s_backend/util"
 )
 
 type GetPodsRequest struct {
@@ -68,7 +68,7 @@ type DeleteAllPodsRequest struct {
 }
 
 type DeleteAllPodsResponse struct {
-	PodNames []string `json:"pod_names"`
+	Requested bool `json:"requested"`
 }
 
 type Server struct {
@@ -267,6 +267,11 @@ func (s *Server) userHasRemainingPods(u managed.User) bool {
 }
 
 func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel) error {
+	_, podIsBeingDeleted := s.DeletingPods[request.PodName]
+	if podIsBeingDeleted {
+		return errors.New(fmt.Sprintf("pod %s is already being deleted", request.PodName))
+	}
+
 	deleter, err := poddeleter.NewPodDeleter(request.PodName, request.UserID, s.Client)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Error starting pod deletion for %s: %s", request.PodName, err.Error()))
@@ -283,7 +288,6 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 		if err != nil {
 			fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
 		}
-		// TODO should `cleanedStorage`'s result be multiplied into `finished`?
 	}
 
 	return nil
@@ -335,5 +339,73 @@ func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) error {
+	user := managed.NewUser(userID, "", s.Client)
+	// Get a list of managed.Pod objects for all of the user's pods
+	podList, err := user.ListPods()
+	if err != nil {
+		return err
+	}
+
+	var chanList []*util.ReadyChannel
+	// For each pod,
+	for _, pod := range podList {
+		// Check that it isn't already being deleted
+		_, deleting := s.DeletingPods[pod.Object.Name]
+		if deleting {
+			continue
+		}
+
+		// Then initialize a deleter and call for the pod's deletion
+		deleter := poddeleter.NewFromPod(pod)
+		ch := util.NewReadyChannel(s.Client.TimeoutDelete)
+		err := deleter.DeletePod(ch)
+		// If something went wrong, log it
+		if err != nil {
+			fmt.Printf("Error calling deletion of pod %s: %s\n", pod.Object.Name, err.Error())
+			continue
+		}
+		chanList = append(chanList, ch)
+		// If the delete call was made successfully, then add the pod to `s.DeletingPods`,
+		s.AddToPodWatchMaps(pod.Object.Name, ch, false)
+	}
+
+	// Finally, remove the user's storage PV and PVC
+	cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
+	err = user.CleanUserStorage(cleanedStorage)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't call for deletion of user storage for %s: %s", userID, err.Error()))
+	}
+	go util.CombineReadyChannels(chanList, finished)
+	return nil
+}
+
+func (s *Server) ServeDeleteAllUserPods(w http.ResponseWriter, r *http.Request) {
+	// Parse the POSTed request JSON and log the request
+	var request DeleteAllPodsRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&request)
+	request.RemoteIP = util.GetRemoteIP(r)
+	fmt.Printf("deleteAllUserPods request: %+v\n", request)
+
+	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
+	err := s.deleteAllUserPods(request.UserID, finished)
+	var status int
+	var response DeleteAllPodsResponse
+	if err != nil {
+		status = http.StatusBadRequest
+		response.Requested = false
+		fmt.Printf("Error: %s\n", err.Error())
+	} else {
+		status = http.StatusOK
+		response.Requested = true
+	}
+
+	// write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
 }
