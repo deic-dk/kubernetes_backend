@@ -50,7 +50,7 @@ type DeletePodRequest struct {
 }
 
 type DeletePodResponse struct {
-	PodName string `json:"pod_name"`
+	Requested bool `json:"requested"`
 }
 
 type WatchDeletePodRequest struct {
@@ -59,7 +59,7 @@ type WatchDeletePodRequest struct {
 }
 
 type WatchDeletePodResponse struct {
-	Ready bool `json:"ready"`
+	Deleted bool `json:"deleted"`
 }
 
 type DeleteAllPodsRequest struct {
@@ -303,11 +303,11 @@ func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
 	var response DeletePodResponse
 	if err != nil {
 		status = http.StatusBadRequest
-		response.PodName = ""
+		response.Requested = false
 		fmt.Printf("Error: %s\n", err.Error())
 	} else {
 		status = http.StatusOK
-		response.PodName = request.PodName
+		response.Requested = true
 	}
 
 	// write the response
@@ -330,8 +330,8 @@ func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
 	decoder.Decode(&request)
 	fmt.Printf("watchDeletePod request %+v\n", request)
 
-	response := WatchCreatePodResponse{}
-	response.Ready = s.watchDeletePod(request)
+	response := WatchDeletePodResponse{}
+	response.Deleted = s.watchDeletePod(request)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
