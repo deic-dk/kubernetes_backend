@@ -72,33 +72,46 @@ type DeleteAllPodsResponse struct {
 }
 
 type Server struct {
-	Client       k8sclient.K8sClient
-	CreatingPods map[string]*util.ReadyChannel
-	DeletingPods map[string]*util.ReadyChannel
-	mutex        *sync.Mutex
+	Client          k8sclient.K8sClient
+	CreatingPods    map[string]*util.ReadyChannel
+	DeletingPods    map[string]*util.ReadyChannel
+	DeletingStorage map[string]*util.ReadyChannel
+	mutex           *sync.Mutex
 }
+
+type serverMapName int
+
+const (
+	CreatingPods    serverMapName = 0
+	DeletingPods    serverMapName = 1
+	DeletingStorage serverMapName = 2
+)
 
 func New(client k8sclient.K8sClient) *Server {
 	var m sync.Mutex
 	return &Server{
-		Client:       client,
-		CreatingPods: make(map[string]*util.ReadyChannel),
-		DeletingPods: make(map[string]*util.ReadyChannel),
-		mutex:        &m,
+		Client:          client,
+		CreatingPods:    make(map[string]*util.ReadyChannel),
+		DeletingPods:    make(map[string]*util.ReadyChannel),
+		DeletingStorage: make(map[string]*util.ReadyChannel),
+		mutex:           &m,
 	}
 }
 
 // Add an entry to s.CreatingPods or s.DeletingPods with `podName` as the key and `finished` as the value.
 // As soon as a value is ready in finished, the entry will be removed from the map.
 // `creating` should be true if adding to s.CreatingPods and false if adding to s.DeletingPods.
-func (s *Server) AddToPodWatchMaps(podName string, finished *util.ReadyChannel, creating bool) {
+func (s *Server) AddToWatchMaps(key string, finished *util.ReadyChannel, mapName serverMapName) {
 	// Thread-safe add podName to the map of creating pods
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if creating {
-		s.CreatingPods[podName] = finished
-	} else {
-		s.DeletingPods[podName] = finished
+	switch mapName {
+	case CreatingPods:
+		s.CreatingPods[key] = finished
+	case DeletingPods:
+		s.DeletingPods[key] = finished
+	case DeletingStorage:
+		s.DeletingStorage[key] = finished
 	}
 
 	// Then watch for the finished signal, and once finished, remove podName from the map
@@ -106,10 +119,13 @@ func (s *Server) AddToPodWatchMaps(podName string, finished *util.ReadyChannel, 
 		finished.Receive()
 		s.mutex.Lock()
 		defer s.mutex.Unlock()
-		if creating {
-			delete(s.CreatingPods, podName)
-		} else {
-			delete(s.DeletingPods, podName)
+		switch mapName {
+		case CreatingPods:
+			delete(s.CreatingPods, key)
+		case DeletingPods:
+			delete(s.DeletingPods, key)
+		case DeletingStorage:
+			delete(s.DeletingStorage, key)
 		}
 	}()
 }
@@ -186,7 +202,7 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 	if err != nil {
 		return response, err
 	}
-	s.AddToPodWatchMaps(pod.Object.Name, finished, true)
+	s.AddToWatchMaps(pod.Object.Name, finished, CreatingPods)
 	response.PodName = pod.Object.Name
 	return response, nil
 }
@@ -269,18 +285,21 @@ func (s *Server) userHasRemainingPods(u managed.User) bool {
 func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel) error {
 	_, podIsBeingDeleted := s.DeletingPods[request.PodName]
 	if podIsBeingDeleted {
+		finished.Send(false)
 		return errors.New(fmt.Sprintf("pod %s is already being deleted", request.PodName))
 	}
 
 	deleter, err := poddeleter.NewPodDeleter(request.PodName, request.UserID, s.Client)
 	if err != nil {
+		finished.Send(false)
 		return errors.New(fmt.Sprintf("Error starting pod deletion for %s: %s", request.PodName, err.Error()))
 	}
 	err = deleter.DeletePod(finished)
 	if err != nil {
+		finished.Send(false)
 		return err
 	}
-	s.AddToPodWatchMaps(request.PodName, finished, false)
+	s.AddToWatchMaps(request.PodName, finished, DeletingPods)
 
 	if !s.userHasRemainingPods(deleter.Pod.Owner) {
 		cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
@@ -288,6 +307,7 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 		if err != nil {
 			fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
 		}
+		s.AddToWatchMaps(deleter.Pod.Owner.Name, cleanedStorage, DeletingStorage)
 	}
 
 	return nil
@@ -370,7 +390,7 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 		}
 		chanList = append(chanList, ch)
 		// If the delete call was made successfully, then add the pod to `s.DeletingPods`,
-		s.AddToPodWatchMaps(pod.Object.Name, ch, false)
+		s.AddToWatchMaps(pod.Object.Name, ch, DeletingPods)
 	}
 
 	// Finally, remove the user's storage PV and PVC
@@ -379,6 +399,8 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't call for deletion of user storage for %s: %s", userID, err.Error()))
 	}
+	s.AddToWatchMaps(user.Name, cleanedStorage, DeletingStorage)
+	chanList = append(chanList, cleanedStorage)
 	go util.CombineReadyChannels(chanList, finished)
 	return nil
 }
