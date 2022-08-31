@@ -25,11 +25,10 @@ type User struct {
 	UserID string
 	Name   string
 	Domain string
-	SiloIP string
 	Client k8sclient.K8sClient
 }
 
-func NewUser(userID string, siloIP string, client k8sclient.K8sClient) User {
+func NewUser(userID string, client k8sclient.K8sClient) User {
 	if userID == "" {
 		return User{Client: client}
 	}
@@ -40,13 +39,7 @@ func NewUser(userID string, siloIP string, client k8sclient.K8sClient) User {
 		Name:   name,
 		Domain: domain,
 		Client: client,
-		SiloIP: siloIP,
 	}
-}
-
-// Return the user's siloIP in the subnet where data can be accessed by the pods.
-func (u *User) GetSiloIPDataNet() string {
-	return strings.Replace(u.SiloIP, "10.0.", "10.2.", 1)
 }
 
 func (u *User) GetListOptions() metav1.ListOptions {
@@ -75,6 +68,16 @@ func (u *User) ListPods() ([]Pod, error) {
 	return pods, nil
 }
 
+func (u *User) OwnsPod(podName string) (bool, error) {
+	opt := u.GetListOptions()
+	opt.FieldSelector = fmt.Sprintf("metadata.name=%s", podName)
+	podList, err := u.Client.ListPods(opt)
+	if err != nil {
+		return false, err
+	}
+	return (len(podList.Items) > 0), nil
+}
+
 // Make a unique string to identify userID in api objects
 func (u *User) GetUserString() string {
 	userString := strings.Replace(u.UserID, "@", "-", -1)
@@ -93,7 +96,7 @@ func (u *User) GetStorageListOptions() metav1.ListOptions {
 }
 
 // Generate an api object for the PV to attempt to create for the user's /tank/storage
-func (u *User) GetTargetStoragePV() *apiv1.PersistentVolume {
+func (u *User) GetTargetStoragePV(siloIP string) *apiv1.PersistentVolume {
 	return &apiv1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: u.GetStoragePVName(),
@@ -101,7 +104,7 @@ func (u *User) GetTargetStoragePV() *apiv1.PersistentVolume {
 				"name":   u.GetStoragePVName(),
 				"user":   u.Name,
 				"domain": u.Domain,
-				"server": u.SiloIP,
+				"server": siloIP,
 			},
 		},
 		Spec: apiv1.PersistentVolumeSpec{
@@ -116,7 +119,7 @@ func (u *User) GetTargetStoragePV() *apiv1.PersistentVolume {
 			},
 			PersistentVolumeSource: apiv1.PersistentVolumeSource{
 				NFS: &apiv1.NFSVolumeSource{
-					Server: u.SiloIP,
+					Server: siloIP,
 					Path:   fmt.Sprintf("/tank/storage/%s", u.UserID),
 				},
 			},
@@ -133,7 +136,7 @@ func (u *User) GetTargetStoragePV() *apiv1.PersistentVolume {
 }
 
 // Generate an api object for the PVC to attempt to create for the user's /tank/storage
-func (u *User) GetTargetStoragePVC() *apiv1.PersistentVolumeClaim {
+func (u *User) GetTargetStoragePVC(siloIP string) *apiv1.PersistentVolumeClaim {
 	return &apiv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: u.Client.Namespace,
@@ -142,7 +145,7 @@ func (u *User) GetTargetStoragePVC() *apiv1.PersistentVolumeClaim {
 				"name":   u.GetStoragePVName(),
 				"user":   u.UserID,
 				"domain": u.Domain,
-				"server": u.SiloIP,
+				"server": siloIP,
 			},
 		},
 		Spec: apiv1.PersistentVolumeClaimSpec{
@@ -242,7 +245,7 @@ type Pod struct {
 
 func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 	userID := util.GetUserIDFromLabels(existingPod.ObjectMeta.Labels)
-	owner := NewUser(userID, "", client)
+	owner := NewUser(userID, client)
 	cache := &podCache{
 		Tokens:            make(map[string]string),
 		OtherResourceInfo: make(map[string]string),

@@ -9,7 +9,7 @@ import (
 )
 
 func TestCleanNonexistentUserStorage(t *testing.T) {
-	u := NewUser("foo@bar", "10.0.0.20", *k8sclient.NewK8sClient())
+	u := NewUser("foo@bar", *k8sclient.NewK8sClient())
 	finished := util.NewReadyChannel(time.Second)
 	err := u.CleanUserStorage(finished)
 	if err != nil {

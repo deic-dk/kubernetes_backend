@@ -134,7 +134,7 @@ func (s *Server) AddToWatchMaps(key string, finished *util.ReadyChannel, mapName
 // If the username string is empty, use all pods in the namespace.
 func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
 	var response GetPodsResponse
-	user := managed.NewUser(request.UserID, request.RemoteIP, s.Client)
+	user := managed.NewUser(request.UserID, s.Client)
 	podList, err := user.ListPods()
 	if err != nil {
 		return response, err
@@ -189,7 +189,8 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 	// make podCreator
 	creator, err := podcreator.NewPodCreator(
 		request.YamlURL,
-		managed.NewUser(request.UserID, request.RemoteIP, s.Client),
+		managed.NewUser(request.UserID, s.Client),
+		request.RemoteIP,
 		request.ContainerEnvVars,
 		s.Client,
 	)
@@ -242,12 +243,24 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-func (s *Server) watchCreatePod(request WatchCreatePodRequest) bool {
+func (s *Server) watchCreatePod(request WatchCreatePodRequest) (WatchCreatePodResponse, error) {
+	response := WatchCreatePodResponse{Ready: false}
 	readyChannel, exists := s.CreatingPods[request.PodName]
-	if !exists {
-		return true
+	if exists {
+		// If the readyChannel receives `false`, then go ahead and return false
+		if !readyChannel.Receive() {
+			return response, nil
+		}
 	}
-	return readyChannel.Receive()
+	u := managed.NewUser(request.UserID, s.Client)
+	// Now the readyChannel either received true or wasn't stored in `s.CreatingPods`
+	// Return true iff the pod exists and is owned by the user
+	owned, err := u.OwnsPod(request.PodName)
+	if err != nil {
+		return response, err
+	}
+	response.Ready = owned
+	return response, nil
 }
 
 func (s *Server) ServeWatchCreatePod(w http.ResponseWriter, r *http.Request) {
@@ -256,11 +269,15 @@ func (s *Server) ServeWatchCreatePod(w http.ResponseWriter, r *http.Request) {
 	decoder.Decode(&request)
 	fmt.Printf("watchCreatePod request %+v\n", request)
 
-	response := WatchCreatePodResponse{}
-	response.Ready = s.watchCreatePod(request)
+	response, err := s.watchCreatePod(request)
+	status := http.StatusOK
+	if err != nil {
+		fmt.Printf("Error watching pod: %s\n", err.Error())
+		status = http.StatusBadRequest
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -282,25 +299,31 @@ func (s *Server) userHasRemainingPods(u managed.User) bool {
 	return false
 }
 
-func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel) error {
+func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel) (DeletePodResponse, error) {
+	response := DeletePodResponse{Requested: false}
 	_, podIsBeingDeleted := s.DeletingPods[request.PodName]
 	if podIsBeingDeleted {
 		finished.Send(false)
-		return errors.New(fmt.Sprintf("pod %s is already being deleted", request.PodName))
+		return response, errors.New(fmt.Sprintf("pod %s is already being deleted", request.PodName))
 	}
 
+	// Try to initialize a podDeleter (this will check that the username matches)
 	deleter, err := poddeleter.NewPodDeleter(request.PodName, request.UserID, s.Client)
 	if err != nil {
 		finished.Send(false)
-		return errors.New(fmt.Sprintf("Error starting pod deletion for %s: %s", request.PodName, err.Error()))
+		return response, errors.New(fmt.Sprintf("Error starting pod deletion for %s: %s", request.PodName, err.Error()))
 	}
+	// Attempt to call for deletion
 	err = deleter.DeletePod(finished)
 	if err != nil {
 		finished.Send(false)
-		return err
+		return response, err
 	}
+	// If that was successful, the server should keep track that this pod is deleting
 	s.AddToWatchMaps(request.PodName, finished, DeletingPods)
 
+	// Then if the user doesn't have remaining pods, call for deletion of their storage,
+	// If this fails, log the error, but don't tell the user, because at this point their pod will be deleted.
 	if !s.userHasRemainingPods(deleter.Pod.Owner) {
 		cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
 		err = deleter.Pod.Owner.CleanUserStorage(cleanedStorage)
@@ -310,7 +333,8 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 		s.AddToWatchMaps(deleter.Pod.Owner.Name, cleanedStorage, DeletingStorage)
 	}
 
-	return nil
+	response.Requested = true
+	return response, nil
 }
 
 func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
@@ -322,16 +346,13 @@ func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("deletePod request: %+v\n", request)
 
 	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
-	err := s.deletePod(request, finished)
+	response, err := s.deletePod(request, finished)
 	var status int
-	var response DeletePodResponse
 	if err != nil {
 		status = http.StatusBadRequest
-		response.Requested = false
 		fmt.Printf("Error: %s\n", err.Error())
 	} else {
 		status = http.StatusOK
-		response.Requested = true
 	}
 
 	// write the response
@@ -363,7 +384,7 @@ func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) error {
-	user := managed.NewUser(userID, "", s.Client)
+	user := managed.NewUser(userID, s.Client)
 	// Get a list of managed.Pod objects for all of the user's pods
 	podList, err := user.ListPods()
 	if err != nil {

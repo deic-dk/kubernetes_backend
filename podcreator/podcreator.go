@@ -23,6 +23,7 @@ type PodCreator struct {
 	targetPod        *apiv1.Pod
 	yamlURL          string
 	user             managed.User
+	siloIP           string
 	containerEnvVars map[string]map[string]string
 	client           k8sclient.K8sClient
 }
@@ -36,12 +37,14 @@ type PodCreator struct {
 func NewPodCreator(
 	yamlURL string,
 	user managed.User,
+	siloIP string,
 	containerEnvVars map[string]map[string]string,
 	client k8sclient.K8sClient,
 ) (PodCreator, error) {
 	creator := PodCreator{
 		yamlURL:          yamlURL,
 		user:             user,
+		siloIP:           siloIP,
 		containerEnvVars: containerEnvVars,
 		client:           client,
 		targetPod:        nil,
@@ -53,11 +56,16 @@ func NewPodCreator(
 	return creator, nil
 }
 
+// Return the user's siloIP in the subnet where data can be accessed by the pods.
+func (pc *PodCreator) getSiloIPDataNet() string {
+	return strings.Replace(pc.siloIP, "10.0.", "10.2.", 1)
+}
+
 // Return the map of environment variables that should be set in each container of
 // the target pod, so that pods can know how to reach the user's data
 func (pc *PodCreator) getMandatoryEnvVars() map[string]string {
 	mandatoryEnvVars := make(map[string]string)
-	mandatoryEnvVars["HOME_SERVER"] = pc.user.GetSiloIPDataNet()
+	mandatoryEnvVars["HOME_SERVER"] = pc.getSiloIPDataNet()
 	mandatoryEnvVars["SD_UID"] = pc.user.UserID
 	return mandatoryEnvVars
 }
@@ -322,7 +330,7 @@ func (pc *PodCreator) ensureUserStorageExists(ready *util.ReadyChannel) error {
 		return err
 	}
 	if len(PVList.Items) == 0 {
-		targetPV := pc.user.GetTargetStoragePV()
+		targetPV := pc.user.GetTargetStoragePV(pc.siloIP)
 		go func() {
 			pc.client.WatchCreatePV(targetPV.Name, PVready)
 			if PVready.Receive() {
@@ -344,7 +352,7 @@ func (pc *PodCreator) ensureUserStorageExists(ready *util.ReadyChannel) error {
 		return err
 	}
 	if len(PVCList.Items) == 0 {
-		targetPVC := pc.user.GetTargetStoragePVC()
+		targetPVC := pc.user.GetTargetStoragePVC(pc.siloIP)
 		go func() {
 			pc.client.WatchCreatePVC(targetPVC.Name, PVCready)
 			if PVCready.Receive() {

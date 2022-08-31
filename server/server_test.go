@@ -2,19 +2,19 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
-	"errors"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 )
 
-const(
+const (
 	testUser = "registeredtest7"
 	remoteIP = "10.0.0.20"
 )
@@ -69,7 +69,7 @@ func userPVOrPVCExist(u managed.User) (bool, error) {
 
 func ensureUserHasNPods(n int) error {
 	s := New(*k8sclient.NewK8sClient())
-	u := managed.NewUser(testUser, "", s.Client)
+	u := managed.NewUser(testUser, s.Client)
 	userPodList, err := u.ListPods()
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list user pods %s", err.Error()))
@@ -77,8 +77,8 @@ func ensureUserHasNPods(n int) error {
 	if len(userPodList) < n {
 		// Then create n jupyter pods
 		request := CreatePodRequest{
-			YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
-			UserID: testUser,
+			YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+			UserID:   testUser,
 			RemoteIP: remoteIP,
 			ContainerEnvVars: map[string]map[string]string{
 				"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
@@ -108,7 +108,6 @@ func ensureUserHasNPods(n int) error {
 	return nil
 }
 
-
 func TestDeleteAllUserPods(t *testing.T) {
 	s := New(*k8sclient.NewK8sClient())
 	// First ensure that the user has at least 1 pod to delete
@@ -118,7 +117,7 @@ func TestDeleteAllUserPods(t *testing.T) {
 	}
 
 	// Make sure the user storage exists
-	u := managed.NewUser(testUser, "", s.Client)
+	u := managed.NewUser(testUser, s.Client)
 	storageExists, err := userPVAndPVCExist(u)
 	if err != nil {
 		t.Fatalf("Couldn't check storage exists: %s", err.Error())
@@ -193,8 +192,8 @@ func TestCreateJupyter(t *testing.T) {
 	fileEnvVar := "testValue42"
 	s := New(*k8sclient.NewK8sClient())
 	request := CreatePodRequest{
-		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
-		UserID: testUser,
+		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+		UserID:   testUser,
 		RemoteIP: remoteIP,
 		ContainerEnvVars: map[string]map[string]string{
 			"jupyter": {"FILE": fileEnvVar, "WORKING_DIRECTORY": "jupyter"},
@@ -221,7 +220,7 @@ func TestCreateJupyter(t *testing.T) {
 	}
 
 	// Make sure that the test user has this pod and no others
-	u := managed.NewUser(testUser, "", s.Client)
+	u := managed.NewUser(testUser, s.Client)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatalf("Couldn't list pods: %s", err.Error())
@@ -254,8 +253,8 @@ func TestCreateJupyter(t *testing.T) {
 func TestAFewMoreJupyterPods(t *testing.T) {
 	s := New(*k8sclient.NewK8sClient())
 	request := CreatePodRequest{
-		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
-		UserID: testUser,
+		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+		UserID:   testUser,
 		RemoteIP: remoteIP,
 		ContainerEnvVars: map[string]map[string]string{
 			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
@@ -281,7 +280,7 @@ func TestAFewMoreJupyterPods(t *testing.T) {
 	for i, podName := range podNamesList {
 		// receive from the corresponding ReadyChannel into a chan, so a select statement can see whether it's ready.
 		ch := make(chan bool, 1)
-		go func() {ch <- chanList[i].Receive()}()
+		go func() { ch <- chanList[i].Receive() }()
 		select {
 		// Either a value should be ready in the channel,
 		case <-ch:
@@ -303,7 +302,7 @@ func TestAFewMoreJupyterPods(t *testing.T) {
 	t.Logf("All pods and start jobs completed successfully")
 
 	// Check that each of the pods that were supposed to be created now exist when listing for the user
-	u := managed.NewUser(testUser, "", s.Client)
+	u := managed.NewUser(testUser, s.Client)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatalf("Couldn't list pods: %s", err.Error())
@@ -322,7 +321,7 @@ func TestAFewMoreJupyterPods(t *testing.T) {
 
 func TestGetPods(t *testing.T) {
 	s := New(*k8sclient.NewK8sClient())
-	u := managed.NewUser(testUser, "", s.Client)
+	u := managed.NewUser(testUser, s.Client)
 
 	// Make sure the user has at least two pods and create them if not
 	err := ensureUserHasNPods(2)
@@ -364,7 +363,7 @@ func TestGetPods(t *testing.T) {
 
 func TestDeletePod(t *testing.T) {
 	s := New(*k8sclient.NewK8sClient())
-	u := managed.NewUser(testUser, "", s.Client)
+	u := managed.NewUser(testUser, s.Client)
 
 	// There should be at least two jupyter pods owned by the testUser from the previous tests.
 	// If not, make them.
@@ -383,12 +382,12 @@ func TestDeletePod(t *testing.T) {
 	// Attempt to delete with a mismatched podName and userID
 	t.Logf("Attempting to delete a pod not owned by the user")
 	deleteRequest := DeletePodRequest{
-		UserID: fmt.Sprintf("%s-extrastring", testUser),
-		PodName: podName,
+		UserID:   fmt.Sprintf("%s-extrastring", testUser),
+		PodName:  podName,
 		RemoteIP: remoteIP,
 	}
 	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
-	err = s.deletePod(deleteRequest, finished)
+	_, err = s.deletePod(deleteRequest, finished)
 	if err == nil {
 		t.Fatalf("deletePod returned without error when the specified pod wasn't owned by the user")
 	}
@@ -399,12 +398,12 @@ func TestDeletePod(t *testing.T) {
 	t.Logf("Confirmed that the user has at least two pods. Attempting to delete %s", podName)
 	// Call for deletion
 	deleteRequest = DeletePodRequest{
-		UserID: testUser,
-		PodName: podName,
+		UserID:   testUser,
+		PodName:  podName,
 		RemoteIP: remoteIP,
 	}
 	finished = util.NewReadyChannel(s.Client.TimeoutDelete)
-	err = s.deletePod(deleteRequest, finished)
+	_, err = s.deletePod(deleteRequest, finished)
 	if err != nil {
 		t.Fatalf("Error calling deletePod: %s", err.Error())
 	}
@@ -412,7 +411,7 @@ func TestDeletePod(t *testing.T) {
 	// There should be an entry in DeletingPods until this finishes
 	// Check by making a channel for a select statement
 	ch := make(chan bool, 1)
-	go func() {ch <- finished.Receive()}()
+	go func() { ch <- finished.Receive() }()
 	select {
 	case <-ch:
 		t.Logf("Pod %s was already deleted before the DeletingPods entry could be checked", podName)
@@ -439,22 +438,22 @@ func TestDeletePod(t *testing.T) {
 		t.Fatalf("userHasRemainingPods should be true at this point")
 	}
 
-	t.Logf("Now deleting all but one pod...")
+	t.Logf("Now deleting all but one pod")
 	// Now delete pods until only one remains, so we can be sure that the PV and PVC are deleted in the end
 	userPodList, err = u.ListPods()
 	if err != nil {
 		t.Fatalf("Couldn't list user pods %s", err.Error())
 	}
 	var waitChanList []*util.ReadyChannel
-	for i := 0; i < len(userPodList) - 1; i++ {
+	for i := 0; i < len(userPodList)-1; i++ {
 		// Call for deletion
 		deleteRequest := DeletePodRequest{
-			UserID: testUser,
-			PodName: userPodList[i].Object.Name,
+			UserID:   testUser,
+			PodName:  userPodList[i].Object.Name,
 			RemoteIP: remoteIP,
 		}
 		finished := util.NewReadyChannel(s.Client.TimeoutDelete)
-		err = s.deletePod(deleteRequest, finished)
+		_, err = s.deletePod(deleteRequest, finished)
 		if err != nil {
 			t.Fatalf("Error calling deletePod: %s", err.Error())
 		}
@@ -487,12 +486,12 @@ func TestDeletePod(t *testing.T) {
 		t.Fatalf("User should only have 1 pod left but has %d", len(userPodList))
 	}
 	deleteRequest = DeletePodRequest{
-		UserID: testUser,
-		PodName: userPodList[0].Object.Name,
+		UserID:   testUser,
+		PodName:  userPodList[0].Object.Name,
 		RemoteIP: remoteIP,
 	}
 	finished = util.NewReadyChannel(s.Client.TimeoutDelete)
-	err = s.deletePod(deleteRequest, finished)
+	_, err = s.deletePod(deleteRequest, finished)
 	if err != nil {
 		t.Fatalf("Error calling deletePod: %s", err.Error())
 	}
@@ -527,16 +526,142 @@ func TestDeletePod(t *testing.T) {
 
 	t.Logf("Attempting to call deletePod for a pod that doesn't exist")
 	deleteRequest = DeletePodRequest{
-		UserID: testUser,
-		PodName: "foobar-pod",
+		UserID:   testUser,
+		PodName:  "foobar-pod",
 		RemoteIP: remoteIP,
 	}
 	finished = util.NewReadyChannel(s.Client.TimeoutDelete)
-	err = s.deletePod(deleteRequest, finished)
+	_, err = s.deletePod(deleteRequest, finished)
 	if err == nil {
 		t.Fatalf("No error when calling deletePod on a pod that doesn't exist")
 	}
 	if finished.Receive() {
 		t.Fatalf("Finished channel received true after deletePod should have failed")
+	}
+}
+
+func TestCreateUbuntu(t *testing.T) {
+	anSshKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n joshua@myhost"
+	s := New(*k8sclient.NewK8sClient())
+	request := CreatePodRequest{
+		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml",
+		UserID:   testUser,
+		RemoteIP: remoteIP,
+		ContainerEnvVars: map[string]map[string]string{
+			"ubuntu-jammy": {"SSH_PUBLIC_KEY": anSshKey},
+		},
+	}
+
+	t.Logf("Attempting to create a new ubuntu pod")
+
+	// Start the pod
+	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
+	response, err := s.createPod(request, finished)
+	if err != nil {
+		t.Fatalf("Couldn't call for pod creation %s", err.Error())
+	}
+	// Make sure the pod started and start jobs ran successfully
+	if !finished.Receive() {
+		t.Fatalf("Pod didn't reach ready state with completed start jobs")
+	}
+
+	// Make sure that the test user has this pod
+	u := managed.NewUser(testUser, s.Client)
+	podList, err := u.ListPods()
+	if err != nil {
+		t.Fatalf("Couldn't list pods: %s", err.Error())
+	}
+	hasPod := false
+	var createdPod managed.Pod
+	for _, pod := range podList {
+		if pod.Object.Name == response.PodName {
+			createdPod = pod
+			hasPod = true
+			break
+		}
+	}
+	if !hasPod {
+		t.Fatalf("Created ubuntu pod doesn't exist")
+	}
+
+	t.Logf("Checking the pod's cache and environment variables")
+	// Check that the environment variables were set correctly in the pod
+	stdout, stderr, err := echoEnvVarInPod(podList[0], "$SSH_PUBLIC_KEY")
+	if err != nil {
+		t.Fatalf("Couldn't test environment variable in jupyter pod:\nstderr: %s\nerror: %s", stderr, err.Error())
+	}
+	// (Note that there may be some kind of EOF character at the end of the stdout buffer)
+	if anSshKey != strings.TrimSpace(stdout) {
+		t.Fatalf("Didn't get correct environment variable in Ubuntu pod. Expected %s, got %s", anSshKey, stdout)
+	}
+
+	// Check that the pod cache exists now
+	_, err = os.Stat(fmt.Sprintf("/tmp/tokens/%s", response.PodName))
+	if err != nil {
+		t.Fatalf("Ubuntu pod cache wasn't saved")
+	}
+
+	t.Logf("Checking that the ssh service was created")
+	// Check that the ssh service was created
+	serviceList, err := createdPod.ListServices()
+	if err != nil {
+		t.Fatalf("Couldn't list services for ubuntu pod")
+	}
+	hasService := false
+	for _, svc := range serviceList.Items {
+		if svc.Name == fmt.Sprintf("%s-ssh", response.PodName) {
+			hasService = true
+			break
+		}
+	}
+	if !hasService {
+		t.Fatalf("Ssh service wasn't created for Ubuntu pod")
+	}
+}
+
+func TestWatchers(t *testing.T) {
+	s := New(*k8sclient.NewK8sClient())
+	request := CreatePodRequest{
+		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+		UserID:   testUser,
+		RemoteIP: remoteIP,
+		ContainerEnvVars: map[string]map[string]string{
+			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
+		},
+	}
+
+	t.Logf("Attempting to create a new jupyter pod")
+	// Start the pod
+	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
+	response, err := s.createPod(request, finished)
+	if err != nil {
+		t.Fatalf("Couldn't call for pod creation %s", err.Error())
+	}
+
+	t.Logf("Calling watchCreatePod with both correct and incorrect username")
+	correctCreateRequest := WatchCreatePodRequest{PodName: response.PodName, UserID: testUser}
+	incorrectCreateRequest := WatchCreatePodRequest{PodName: response.PodName, UserID: fmt.Sprintf("%s-extra", testUser)}
+	go func() {
+		response, err := s.watchCreatePod(correctCreateRequest)
+		if err != nil {
+			t.Fatalf("Error while watching for pod creation %s", err.Error())
+		}
+		if !response.Ready {
+			t.Fatalf("Got false when watching for pod creation when it should have returned true")
+		}
+	}()
+	go func() {
+		response, err := s.watchCreatePod(incorrectCreateRequest)
+		if err != nil {
+			t.Fatalf("Error while watching for pod creation %s", err.Error())
+		}
+		if response.Ready {
+			t.Fatalf("Got true when watching for pod creation with the incorrect userID")
+		}
+	}()
+
+	// Make sure the pod started and start jobs ran successfully
+	if !finished.Receive() {
+		t.Fatalf("Pod didn't reach ready state with completed start jobs")
 	}
 }
