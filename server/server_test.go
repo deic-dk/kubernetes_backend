@@ -495,10 +495,10 @@ func TestDeletePod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error calling deletePod: %s", err.Error())
 	}
-	storageCleanedChannel, storageCleanedChannelExists := s.DeletingStorage[u.Name]
+	storageCleanedEntry, storageCleanedChannelExists := s.DeletingStorage[u.Name]
 	if storageCleanedChannelExists {
 		// If the storageCleanedChannel does exist, then receive to check that the storage is cleaned
-		if !storageCleanedChannel.Receive() {
+		if !storageCleanedEntry.readyChannel.Receive() {
 			t.Fatalf("storageCleanedChannel didn't receive true when deleting the user's last pod")
 		}
 	} else {
@@ -652,8 +652,8 @@ func TestWatchers(t *testing.T) {
 	}()
 	go func() {
 		response, err := s.watchCreatePod(incorrectCreateRequest)
-		if err != nil {
-			t.Fatalf("Error while watching for pod creation %s", err.Error())
+		if err == nil {
+			t.Fatalf("Didn't get error when watching for pod creating with incorrect user")
 		}
 		if response.Ready {
 			t.Fatalf("Got true when watching for pod creation with the incorrect userID")
@@ -663,5 +663,64 @@ func TestWatchers(t *testing.T) {
 	// Make sure the pod started and start jobs ran successfully
 	if !finished.Receive() {
 		t.Fatalf("Pod didn't reach ready state with completed start jobs")
+	}
+
+	// Now that it's finished, try watching it again, first with the correct user
+	watchCreateResponse, err := s.watchCreatePod(correctCreateRequest)
+	if err != nil {
+		t.Fatalf("Error while watching for pod creation %s", err.Error())
+	}
+	if !watchCreateResponse.Ready {
+		t.Fatalf("Got false when watching for pod creation when it should have returned true")
+	}
+	// and then with the incorrect user
+	watchCreateResponse, err = s.watchCreatePod(incorrectCreateRequest)
+	if err == nil {
+		t.Fatalf("Didn't get error when watching for pod creating with incorrect user")
+	}
+	if watchCreateResponse.Ready {
+		t.Fatalf("Got true when watching for pod creation with the incorrect userID")
+	}
+
+	t.Logf("Attempting to watch for pod deletion")
+	deleteRequest := DeletePodRequest{PodName: response.PodName, UserID: testUser}
+	finishedDeleting := util.NewReadyChannel(s.Client.TimeoutDelete)
+	_, err = s.deletePod(deleteRequest, finishedDeleting)
+
+	t.Logf("Calling watchDeletePod with both correct and incorrect username")
+	correctDeleteRequest := WatchDeletePodRequest{PodName: response.PodName, UserID: testUser}
+	incorrectDeleteRequest := WatchDeletePodRequest{PodName: response.PodName, UserID: fmt.Sprintf("%s-extra", testUser)}
+	go func() {
+		response, err := s.watchDeletePod(correctDeleteRequest)
+		if err != nil {
+			t.Fatalf("Error while watching for pod deletion %s", err.Error())
+		}
+		if !response.Deleted {
+			t.Fatalf("Got false when watching for pod deletion when it should have returned true")
+		}
+	}()
+	go func() {
+		response, err := s.watchDeletePod(incorrectDeleteRequest)
+		if err == nil {
+			t.Fatalf("Didn't get error when watching for pod deletion with incorrect user")
+		}
+		if !response.Deleted {
+			t.Fatalf("Got false when watching for pod deletion with the incorrect userID")
+		}
+	}()
+
+	// Make sure the pod started and start jobs ran successfully
+	if !finished.Receive() {
+		t.Fatalf("Pod didn't reach ready state with completed start jobs")
+	}
+
+	// Now that it's finished, try watching it again
+	// Because it's deleted now, the username can't matter
+	watchDeleteResponse, err := s.watchDeletePod(correctDeleteRequest)
+	if err != nil {
+		t.Fatalf("Error while watching for pod creation %s", err.Error())
+	}
+	if !watchDeleteResponse.Deleted {
+		t.Fatalf("Got false when watching for pod deletion when it should have returned true")
 	}
 }

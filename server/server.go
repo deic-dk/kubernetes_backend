@@ -71,52 +71,56 @@ type DeleteAllPodsResponse struct {
 	Requested bool `json:"requested"`
 }
 
+type watchMapEntry struct {
+	authCheck    string
+	readyChannel *util.ReadyChannel
+}
+
 type Server struct {
 	Client          k8sclient.K8sClient
-	CreatingPods    map[string]*util.ReadyChannel
-	DeletingPods    map[string]*util.ReadyChannel
-	DeletingStorage map[string]*util.ReadyChannel
+	CreatingPods    map[string]watchMapEntry
+	DeletingPods    map[string]watchMapEntry
+	DeletingStorage map[string]watchMapEntry
 	mutex           *sync.Mutex
 }
 
-type serverMapName int
+type watchMapName int
 
 const (
-	CreatingPods    serverMapName = 0
-	DeletingPods    serverMapName = 1
-	DeletingStorage serverMapName = 2
+	CreatingPods    watchMapName = 0
+	DeletingPods    watchMapName = 1
+	DeletingStorage watchMapName = 2
 )
 
 func New(client k8sclient.K8sClient) *Server {
 	var m sync.Mutex
 	return &Server{
 		Client:          client,
-		CreatingPods:    make(map[string]*util.ReadyChannel),
-		DeletingPods:    make(map[string]*util.ReadyChannel),
-		DeletingStorage: make(map[string]*util.ReadyChannel),
+		CreatingPods:    make(map[string]watchMapEntry),
+		DeletingPods:    make(map[string]watchMapEntry),
+		DeletingStorage: make(map[string]watchMapEntry),
 		mutex:           &m,
 	}
 }
 
-// Add an entry to s.CreatingPods or s.DeletingPods with `podName` as the key and `finished` as the value.
-// As soon as a value is ready in finished, the entry will be removed from the map.
-// `creating` should be true if adding to s.CreatingPods and false if adding to s.DeletingPods.
-func (s *Server) AddToWatchMaps(key string, finished *util.ReadyChannel, mapName serverMapName) {
-	// Thread-safe add podName to the map of creating pods
+// Add an entry to the specified watchMap (e.g. `s.CreatingPods`) for the given key.
+// As soon as a value is ready in `entry.readyChannel`, the entry will be removed from the map.
+func (s *Server) AddToWatchMaps(key string, entry watchMapEntry, mapName watchMapName) {
+	// Thread-safe add `key` to the map of events to wait for
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	switch mapName {
 	case CreatingPods:
-		s.CreatingPods[key] = finished
+		s.CreatingPods[key] = entry
 	case DeletingPods:
-		s.DeletingPods[key] = finished
+		s.DeletingPods[key] = entry
 	case DeletingStorage:
-		s.DeletingStorage[key] = finished
+		s.DeletingStorage[key] = entry
 	}
 
-	// Then watch for the finished signal, and once finished, remove podName from the map
+	// Then watch for the finished signal, and once finished, remove `key` from the map
 	go func() {
-		finished.Receive()
+		entry.readyChannel.Receive()
 		s.mutex.Lock()
 		defer s.mutex.Unlock()
 		switch mapName {
@@ -203,7 +207,10 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 	if err != nil {
 		return response, err
 	}
-	s.AddToWatchMaps(pod.Object.Name, finished, CreatingPods)
+	s.AddToWatchMaps(
+		pod.Object.Name,
+		watchMapEntry{readyChannel: finished, authCheck: request.UserID},
+		CreatingPods)
 	response.PodName = pod.Object.Name
 	return response, nil
 }
@@ -245,16 +252,21 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) watchCreatePod(request WatchCreatePodRequest) (WatchCreatePodResponse, error) {
 	response := WatchCreatePodResponse{Ready: false}
-	readyChannel, exists := s.CreatingPods[request.PodName]
+	entry, exists := s.CreatingPods[request.PodName]
 	if exists {
-		// If the readyChannel receives `false`, then go ahead and return false
-		if !readyChannel.Receive() {
-			return response, nil
+		// Check that the userID matches the pod
+		if entry.authCheck != request.UserID {
+			return response, errors.New(
+				fmt.Sprintf("Requested userID %s does not match pod's owner %s", request.UserID, entry.authCheck),
+			)
 		}
+		// Respond when there is a value in the ready channel
+		response.Ready = entry.readyChannel.Receive()
+		return response, nil
 	}
+
+	// If there was no entry for this pod in `s.CreatingPods`, return true iff the pod exists and is owned by the user
 	u := managed.NewUser(request.UserID, s.Client)
-	// Now the readyChannel either received true or wasn't stored in `s.CreatingPods`
-	// Return true iff the pod exists and is owned by the user
 	owned, err := u.OwnsPod(request.PodName)
 	if err != nil {
 		return response, err
@@ -320,7 +332,10 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 		return response, err
 	}
 	// If that was successful, the server should keep track that this pod is deleting
-	s.AddToWatchMaps(request.PodName, finished, DeletingPods)
+	s.AddToWatchMaps(
+		request.PodName,
+		watchMapEntry{readyChannel: finished, authCheck: request.UserID},
+		DeletingPods)
 
 	// Then if the user doesn't have remaining pods, call for deletion of their storage,
 	// If this fails, log the error, but don't tell the user, because at this point their pod will be deleted.
@@ -330,7 +345,10 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 		if err != nil {
 			fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
 		}
-		s.AddToWatchMaps(deleter.Pod.Owner.Name, cleanedStorage, DeletingStorage)
+		s.AddToWatchMaps(
+			deleter.Pod.Owner.Name,
+			watchMapEntry{readyChannel: cleanedStorage},
+			DeletingStorage)
 	}
 
 	response.Requested = true
@@ -361,12 +379,32 @@ func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (s *Server) watchDeletePod(request WatchDeletePodRequest) bool {
-	readyChannel, exists := s.DeletingPods[request.PodName]
-	if !exists {
-		return true
+// Watch for the deletion of the pod with name `request.PodName`,
+// Return with `response.Deleted` false iff:
+// (the ready channel retuns false, or (there is no s.DeletingPods entry and the user owns a pod with that podName))
+func (s *Server) watchDeletePod(request WatchDeletePodRequest) (WatchDeletePodResponse, error) {
+	// Default true, so that if there is no entry in `s.DeletingPods`, there's no difference between
+	// the pod not existing and the pod existing with a different owner than `request.UserID`
+	response := WatchDeletePodResponse{Deleted: true}
+	entry, exists := s.DeletingPods[request.PodName]
+	if exists {
+		if entry.authCheck != request.UserID {
+			return response, errors.New(
+				fmt.Sprintf("Requested userID %s does not match pod's owner %s", request.UserID, entry.authCheck),
+			)
+		}
+		response.Deleted = entry.readyChannel.Receive()
+		return response, nil
 	}
-	return readyChannel.Receive()
+
+	u := managed.NewUser(request.UserID, s.Client)
+	owned, err := u.OwnsPod(request.PodName)
+	if err != nil {
+		return response, err
+	}
+	response.Deleted = !owned
+	return response, nil
+
 }
 
 func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
@@ -375,11 +413,15 @@ func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
 	decoder.Decode(&request)
 	fmt.Printf("watchDeletePod request %+v\n", request)
 
-	response := WatchDeletePodResponse{}
-	response.Deleted = s.watchDeletePod(request)
+	response, err := s.watchDeletePod(request)
+	status := http.StatusOK
+	if err != nil {
+		fmt.Printf("Error while watching for pod deletion: %s\n", err.Error())
+		status = http.StatusBadRequest
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -411,7 +453,10 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 		}
 		chanList = append(chanList, ch)
 		// If the delete call was made successfully, then add the pod to `s.DeletingPods`,
-		s.AddToWatchMaps(pod.Object.Name, ch, DeletingPods)
+		s.AddToWatchMaps(
+			pod.Object.Name,
+			watchMapEntry{readyChannel: ch, authCheck: userID},
+			DeletingPods)
 	}
 
 	// Finally, remove the user's storage PV and PVC
@@ -420,7 +465,10 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't call for deletion of user storage for %s: %s", userID, err.Error()))
 	}
-	s.AddToWatchMaps(user.Name, cleanedStorage, DeletingStorage)
+	s.AddToWatchMaps(
+		user.Name,
+		watchMapEntry{readyChannel: cleanedStorage},
+		DeletingStorage)
 	chanList = append(chanList, cleanedStorage)
 	go util.CombineReadyChannels(chanList, finished)
 	return nil

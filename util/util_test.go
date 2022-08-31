@@ -1,9 +1,9 @@
 package util
 
 import (
+	"sync"
 	"testing"
 	"time"
-	"sync"
 )
 
 func TestReadyChannel(t *testing.T) {
@@ -34,16 +34,16 @@ func TestReadyChannel(t *testing.T) {
 }
 
 func TestGetUserIDFromLabels(t *testing.T) {
-	tests := []struct{
+	tests := []struct {
 		input map[string]string
-		want string
+		want  string
 	}{
-		{map[string]string{"user":"foo","domain":"bar"}, "foo@bar"},
-		{map[string]string{"user":"foo","domain":""}, "foo"},
-		{map[string]string{"domain":"bar"}, ""},
-		{map[string]string{"user":"","domain":"bar"}, ""},
-		{map[string]string{"user":"foo","domain":""}, "foo"},
-		{map[string]string{"user":"foo"}, "foo"},
+		{map[string]string{"user": "foo", "domain": "bar"}, "foo@bar"},
+		{map[string]string{"user": "foo", "domain": ""}, "foo"},
+		{map[string]string{"domain": "bar"}, ""},
+		{map[string]string{"user": "", "domain": "bar"}, ""},
+		{map[string]string{"user": "foo", "domain": ""}, "foo"},
+		{map[string]string{"user": "foo"}, "foo"},
 	}
 	for _, test := range tests {
 		if GetUserIDFromLabels(test.input) != test.want {
