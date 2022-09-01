@@ -481,6 +481,11 @@ func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.Re
 
 	// Delete all of the pod's related services
 	serviceList, err := p.ListServices()
+	if err != nil {
+		fmt.Printf("Error listing services for pod %s", err.Error())
+		finished.Send(false)
+		return
+	}
 	if len(serviceList.Items) > 0 {
 		deleteChannels := make([]*util.ReadyChannel, len(serviceList.Items))
 		// For each service, call for deletion and add a watcher channel to the list of deleteChannels
