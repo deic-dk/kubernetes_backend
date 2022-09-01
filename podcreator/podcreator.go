@@ -51,7 +51,7 @@ func NewPodCreator(
 	}
 	err := creator.initTargetPod()
 	if err != nil {
-		return creator, errors.New("Couldn't initialize PodCreator with a valid targetPod")
+		return creator, errors.New(fmt.Sprintf("Couldn't initialize PodCreator with a valid targetPod: %s", err.Error()))
 	}
 	return creator, nil
 }

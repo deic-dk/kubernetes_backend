@@ -17,6 +17,7 @@ import (
 const (
 	testUser = "registeredtest7"
 	remoteIP = "10.0.0.20"
+	testSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n joshua@myhost"
 )
 
 func echoEnvVarInPod(pod managed.Pod, envVar string) (string, string, error) {
@@ -67,6 +68,44 @@ func userPVOrPVCExist(u managed.User) (bool, error) {
 	return false, nil
 }
 
+func createBasicPod(podType string) error {
+	s := New(*k8sclient.NewK8sClient())
+	var request CreatePodRequest
+	switch podType {
+	case "jupyter":
+		request = CreatePodRequest{
+			YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+			UserID:   testUser,
+			RemoteIP: remoteIP,
+			ContainerEnvVars: map[string]map[string]string{
+				"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
+			},
+		}
+	case "ubuntu":
+		request = CreatePodRequest{
+			YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml",
+			UserID:   testUser,
+			RemoteIP: remoteIP,
+			ContainerEnvVars: map[string]map[string]string{
+				"ubuntu-jammy": {"SSH_PUBLIC_KEY": testSshKey},
+			},
+		}
+	default:
+		return errors.New("Unknown pod type")
+	}
+
+	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
+	_, err := s.createPod(request, finished)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't call for pod creation %s", err.Error()))
+	}
+	// Make sure the pod started and start jobs ran successfully
+	if !finished.Receive() {
+		return errors.New(fmt.Sprintf("Pod didn't reach ready state with completed start jobs"))
+	}
+	return nil
+}
+
 func ensureUserHasNPods(n int) error {
 	s := New(*k8sclient.NewK8sClient())
 	u := managed.NewUser(testUser, s.Client)
@@ -76,23 +115,10 @@ func ensureUserHasNPods(n int) error {
 	}
 	if len(userPodList) < n {
 		// Then create n jupyter pods
-		request := CreatePodRequest{
-			YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
-			UserID:   testUser,
-			RemoteIP: remoteIP,
-			ContainerEnvVars: map[string]map[string]string{
-				"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
-			},
-		}
 		for i := 0; i < n; i++ {
-			finished := util.NewReadyChannel(s.Client.TimeoutDelete)
-			_, err := s.createPod(request, finished)
+			err := createBasicPod("jupyter")
 			if err != nil {
-				return errors.New(fmt.Sprintf("Couldn't call for pod creation %s", err.Error()))
-			}
-			// Make sure the pod started and start jobs ran successfully
-			if !finished.Receive() {
-				return errors.New(fmt.Sprintf("Pod didn't reach ready state with completed start jobs"))
+				return err
 			}
 		}
 	}
@@ -541,14 +567,13 @@ func TestDeletePod(t *testing.T) {
 }
 
 func TestCreateUbuntu(t *testing.T) {
-	anSshKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n joshua@myhost"
 	s := New(*k8sclient.NewK8sClient())
 	request := CreatePodRequest{
 		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml",
 		UserID:   testUser,
 		RemoteIP: remoteIP,
 		ContainerEnvVars: map[string]map[string]string{
-			"ubuntu-jammy": {"SSH_PUBLIC_KEY": anSshKey},
+			"ubuntu-jammy": {"SSH_PUBLIC_KEY": testSshKey},
 		},
 	}
 
@@ -591,8 +616,8 @@ func TestCreateUbuntu(t *testing.T) {
 		t.Fatalf("Couldn't test environment variable in jupyter pod:\nstderr: %s\nerror: %s", stderr, err.Error())
 	}
 	// (Note that there may be some kind of EOF character at the end of the stdout buffer)
-	if anSshKey != strings.TrimSpace(stdout) {
-		t.Fatalf("Didn't get correct environment variable in Ubuntu pod. Expected %s, got %s", anSshKey, stdout)
+	if testSshKey != strings.TrimSpace(stdout) {
+		t.Fatalf("Didn't get correct environment variable in Ubuntu pod. Expected %s, got %s", testSshKey, stdout)
 	}
 
 	// Check that the pod cache exists now
@@ -722,5 +747,30 @@ func TestWatchers(t *testing.T) {
 	}
 	if !watchDeleteResponse.Deleted {
 		t.Fatalf("Got false when watching for pod deletion when it should have returned true")
+	}
+}
+
+func TestEnsureUserHasStandardPodSet(t *testing.T) {
+	desiredPods := []string{"jupyter", "ubuntu"}
+	u := managed.NewUser(testUser, *k8sclient.NewK8sClient())
+	podList, err := u.ListPods()
+	if err != nil {
+		t.Fatalf("Couldn't list pods %s", err.Error())
+	}
+	for _, podType := range desiredPods {
+		has := false
+		for _, pod := range podList {
+			if strings.Contains(pod.Object.Name, podType) {
+				has = true
+				t.Logf("User has pod of type %s", podType)
+				break
+			}
+		}
+		if !has {
+			err = createBasicPod(podType)
+			if err != nil {
+				t.Fatalf("Couldn't create pod %s", err.Error())
+			}
+		}
 	}
 }
