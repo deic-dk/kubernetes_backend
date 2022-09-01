@@ -19,7 +19,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-const tokenByteLimit = 4096
+const (
+	tokenByteLimit = 4096
+	nfsStorageRoot = "/tank/storage"
+)
 
 type User struct {
 	UserID string
@@ -85,7 +88,7 @@ func (u *User) GetUserString() string {
 	return userString
 }
 
-// Return a unique name for the user's /tank/storage PV and PVC (same name used for both)
+// Return a unique name for the user's nfs storage PV and PVC (same name used for both)
 func (u *User) GetStoragePVName() string {
 	return fmt.Sprintf("user-storage-%s", u.GetUserString())
 }
@@ -95,8 +98,12 @@ func (u *User) GetStorageListOptions() metav1.ListOptions {
 	return metav1.ListOptions{LabelSelector: fmt.Sprintf("name=%s", u.GetStoragePVName())}
 }
 
-// Generate an api object for the PV to attempt to create for the user's /tank/storage
-func (u *User) GetTargetStoragePV(siloIP string) *apiv1.PersistentVolume {
+func (u *User) getNfsStoragePath() string {
+	return fmt.Sprintf("%s/%s", nfsStorageRoot, u.UserID)
+}
+
+// Generate an api object for the PV to attempt to create for the user's nfs storage
+func (u *User) GetTargetStoragePV(nfsIP string) *apiv1.PersistentVolume {
 	return &apiv1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: u.GetStoragePVName(),
@@ -104,7 +111,7 @@ func (u *User) GetTargetStoragePV(siloIP string) *apiv1.PersistentVolume {
 				"name":   u.GetStoragePVName(),
 				"user":   u.Name,
 				"domain": u.Domain,
-				"server": siloIP,
+				"server": nfsIP,
 			},
 		},
 		Spec: apiv1.PersistentVolumeSpec{
@@ -119,8 +126,8 @@ func (u *User) GetTargetStoragePV(siloIP string) *apiv1.PersistentVolume {
 			},
 			PersistentVolumeSource: apiv1.PersistentVolumeSource{
 				NFS: &apiv1.NFSVolumeSource{
-					Server: siloIP,
-					Path:   fmt.Sprintf("/tank/storage/%s", u.UserID),
+					Server: nfsIP,
+					Path:   u.getNfsStoragePath(),
 				},
 			},
 			ClaimRef: &apiv1.ObjectReference{
@@ -135,17 +142,17 @@ func (u *User) GetTargetStoragePV(siloIP string) *apiv1.PersistentVolume {
 	}
 }
 
-// Generate an api object for the PVC to attempt to create for the user's /tank/storage
-func (u *User) GetTargetStoragePVC(siloIP string) *apiv1.PersistentVolumeClaim {
+// Generate an api object for the PVC to attempt to create for the user's nfs storage
+func (u *User) GetTargetStoragePVC(nfsIP string) *apiv1.PersistentVolumeClaim {
 	return &apiv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: u.Client.Namespace,
 			Name:      u.GetStoragePVName(),
 			Labels: map[string]string{
 				"name":   u.GetStoragePVName(),
-				"user":   u.UserID,
+				"user":   u.Name,
 				"domain": u.Domain,
-				"server": siloIP,
+				"server": nfsIP,
 			},
 		},
 		Spec: apiv1.PersistentVolumeClaimSpec{
@@ -164,7 +171,7 @@ func (u *User) GetTargetStoragePVC(siloIP string) *apiv1.PersistentVolumeClaim {
 }
 
 // Delete the user's storage PV and PVC
-func (u *User) CleanUserStorage(finished *util.ReadyChannel) error {
+func (u *User) DeleteUserStorage(finished *util.ReadyChannel) error {
 	pvName := u.GetStoragePVName()
 	// Start a watcher for PV deletion,
 	pvChan := util.NewReadyChannel(u.Client.TimeoutDelete)
@@ -214,6 +221,58 @@ func (u *User) CleanUserStorage(finished *util.ReadyChannel) error {
 	return nil
 }
 
+// Check that the PV and PVC for the user's nfs storage exist and create them if not
+func (u *User) CreateUserStorageIfNotExist(ready *util.ReadyChannel, nfsIP string) error {
+	listOptions := u.GetStorageListOptions()
+	PVready := util.NewReadyChannel(u.Client.TimeoutCreate)
+	PVCready := util.NewReadyChannel(u.Client.TimeoutCreate)
+	PVList, err := u.Client.ListPV(listOptions)
+	if err != nil {
+		return err
+	}
+	if len(PVList.Items) == 0 {
+		targetPV := u.GetTargetStoragePV(nfsIP)
+		go func() {
+			u.Client.WatchCreatePV(targetPV.Name, PVready)
+			if PVready.Receive() {
+				fmt.Printf("Ready PV %s\n", targetPV.Name)
+			} else {
+				fmt.Printf("Warning PV %s didn't reach ready state\n", targetPV.Name)
+			}
+		}()
+		_, err := u.Client.CreatePV(targetPV)
+		if err != nil {
+			return err
+		}
+	} else {
+		PVready.Send(true)
+	}
+
+	PVCList, err := u.Client.ListPVC(listOptions)
+	if err != nil {
+		return err
+	}
+	if len(PVCList.Items) == 0 {
+		targetPVC := u.GetTargetStoragePVC(nfsIP)
+		go func() {
+			u.Client.WatchCreatePVC(targetPVC.Name, PVCready)
+			if PVCready.Receive() {
+				fmt.Printf("Ready PVC %s\n", targetPVC.Name)
+			} else {
+				fmt.Printf("Warning PVC %s didn't reach ready state\n", targetPVC.Name)
+			}
+		}()
+		_, err := u.Client.CreatePVC(targetPVC)
+		if err != nil {
+			return err
+		}
+	} else {
+		PVCready.Send(true)
+	}
+	go util.CombineReadyChannels([]*util.ReadyChannel{PVready, PVCready}, ready)
+	return nil
+}
+
 // Struct for data to cache for quick getPods responses
 // podTmpFiles[key] is for /tmp/key created by the pod,
 // otherResourceInfo is for data about other k8s resources related to the pod, e.g. sshport
@@ -252,7 +311,7 @@ func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 	}
 }
 
-func (p *Pod) getCacheFile() string {
+func (p *Pod) getCacheFilename() string {
 	return fmt.Sprintf("%s/%s", p.Client.TokenDir, p.Object.Name)
 }
 
@@ -335,7 +394,7 @@ func (p *Pod) getSshPort() (string, error) {
 }
 
 // fill p.cache.OtherResourceInfo with information about other k8s resources relevant to the pod
-func (p *Pod) fillOtherResourceInfo() map[string]string {
+func (p *Pod) getOtherResourceInfo() map[string]string {
 	otherResourceInfo := make(map[string]string)
 	if p.needsSshService() {
 		sshPort, err := p.getSshPort()
@@ -361,7 +420,7 @@ func (p *Pod) savePodCache(cache podCache) error {
 	}
 
 	// if the token file exists, delete it
-	err = os.Remove(p.getCacheFile())
+	err = os.Remove(p.getCacheFilename())
 	if err != nil {
 		// if there was an error other than that the file didn't exist
 		if !os.IsNotExist(err) {
@@ -370,7 +429,7 @@ func (p *Pod) savePodCache(cache podCache) error {
 	}
 
 	// save the buffer
-	err = ioutil.WriteFile(p.getCacheFile(), b.Bytes(), 0600)
+	err = ioutil.WriteFile(p.getCacheFilename(), b.Bytes(), 0600)
 	if err != nil {
 		return err
 	}
@@ -380,7 +439,7 @@ func (p *Pod) savePodCache(cache podCache) error {
 func (p *Pod) loadPodCache() (podCache, error) {
 	var cache podCache
 	// create an io.Reader for the file
-	file, err := os.Open(p.getCacheFile())
+	file, err := os.Open(p.getCacheFilename())
 	if err != nil {
 		return cache, err
 	}
@@ -412,7 +471,7 @@ func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.Re
 	}
 
 	// Delete the cache file if it exists
-	err := os.Remove(p.getCacheFile())
+	err := os.Remove(p.getCacheFilename())
 	if err != nil {
 		// if there was an error other than that the file didn't exist, log it
 		if !os.IsNotExist(err) {
@@ -462,8 +521,8 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 	if p.needsSshService() {
 		p.startSshService()
 	}
-	tokens := p.copyAllTokens(false)
-	otherResourceInfo := p.fillOtherResourceInfo()
+	tokens := p.getAllTokens(false)
+	otherResourceInfo := p.getOtherResourceInfo()
 	err := p.savePodCache(
 		podCache{
 			Tokens:            tokens,
@@ -485,7 +544,7 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 // copy the token from the pod held in /tmp/key to the filesystem, ready to be served by getPods.
 // If reload is true, it will only attempt each token once,
 // otherwise, it will try a few times to give the pod time to create /tmp/key after starting
-func (p *Pod) copyAllTokens(reload bool) map[string]string {
+func (p *Pod) getAllTokens(reload bool) map[string]string {
 	tokenMap := make(map[string]string)
 	var toCopy []string
 	for key, value := range p.Object.ObjectMeta.Annotations {
@@ -498,14 +557,14 @@ func (p *Pod) copyAllTokens(reload bool) map[string]string {
 		var token string
 		if reload {
 			// if reloading tokens of pods that should already have created /tmp/key
-			token, err = p.copyToken(key)
+			token, err = p.getToken(key)
 			if err != nil {
 				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
 			}
 		} else {
 			// give a new pod up to 10s to create /tmp/key before giving up
 			for i := 0; i < 10; i++ {
-				token, err = p.copyToken(key)
+				token, err = p.getToken(key)
 				if err != nil {
 					time.Sleep(1 * time.Second)
 				} else {
@@ -525,7 +584,7 @@ func (p *Pod) copyAllTokens(reload bool) map[string]string {
 }
 
 // Try to copy /tmp/"key" in the created pod into /tmp into p.cache.tokens
-func (p *Pod) copyToken(key string) (string, error) {
+func (p *Pod) getToken(key string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	var err error
 	stdout, stderr, err = p.Client.PodExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, p.Object, 0)

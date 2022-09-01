@@ -341,7 +341,7 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 	// If this fails, log the error, but don't tell the user, because at this point their pod will be deleted.
 	if !s.userHasRemainingPods(deleter.Pod.Owner) {
 		cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
-		err = deleter.Pod.Owner.CleanUserStorage(cleanedStorage)
+		err = deleter.Pod.Owner.DeleteUserStorage(cleanedStorage)
 		if err != nil {
 			fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
 		}
@@ -461,7 +461,7 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 
 	// Finally, remove the user's storage PV and PVC
 	cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
-	err = user.CleanUserStorage(cleanedStorage)
+	err = user.DeleteUserStorage(cleanedStorage)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't call for deletion of user storage for %s: %s", userID, err.Error()))
 	}

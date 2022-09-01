@@ -280,7 +280,7 @@ func (pc *PodCreator) CreatePod(ready *util.ReadyChannel) (managed.Pod, error) {
 
 	storageReady := util.NewReadyChannel(pc.client.TimeoutCreate)
 	if pc.requiresUserStorage() {
-		pc.ensureUserStorageExists(storageReady)
+		pc.user.CreateUserStorageIfNotExist(storageReady, pc.siloIP)
 	} else {
 		storageReady.Send(true)
 	}
@@ -320,54 +320,3 @@ func (pc *PodCreator) requiresUserStorage() bool {
 	return req
 }
 
-// Check that the PV and PVC for the user's /tank/storage directory exist if required
-func (pc *PodCreator) ensureUserStorageExists(ready *util.ReadyChannel) error {
-	listOptions := pc.user.GetStorageListOptions()
-	PVready := util.NewReadyChannel(pc.client.TimeoutCreate)
-	PVCready := util.NewReadyChannel(pc.client.TimeoutCreate)
-	PVList, err := pc.client.ListPV(listOptions)
-	if err != nil {
-		return err
-	}
-	if len(PVList.Items) == 0 {
-		targetPV := pc.user.GetTargetStoragePV(pc.siloIP)
-		go func() {
-			pc.client.WatchCreatePV(targetPV.Name, PVready)
-			if PVready.Receive() {
-				fmt.Printf("Ready PV %s\n", targetPV.Name)
-			} else {
-				fmt.Printf("Warning PV %s didn't reach ready state\n", targetPV.Name)
-			}
-		}()
-		_, err := pc.client.CreatePV(targetPV)
-		if err != nil {
-			return err
-		}
-	} else {
-		PVready.Send(true)
-	}
-
-	PVCList, err := pc.client.ListPVC(listOptions)
-	if err != nil {
-		return err
-	}
-	if len(PVCList.Items) == 0 {
-		targetPVC := pc.user.GetTargetStoragePVC(pc.siloIP)
-		go func() {
-			pc.client.WatchCreatePVC(targetPVC.Name, PVCready)
-			if PVCready.Receive() {
-				fmt.Printf("Ready PVC %s\n", targetPVC.Name)
-			} else {
-				fmt.Printf("Warning PVC %s didn't reach ready state\n", targetPVC.Name)
-			}
-		}()
-		_, err := pc.client.CreatePVC(targetPVC)
-		if err != nil {
-			return err
-		}
-	} else {
-		PVCready.Send(true)
-	}
-	go util.CombineReadyChannels([]*util.ReadyChannel{PVready, PVCready}, ready)
-	return nil
-}
