@@ -240,21 +240,15 @@ type Pod struct {
 	Object *apiv1.Pod
 	Owner  User
 	Client k8sclient.K8sClient
-	cache  *podCache
 }
 
 func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
 	userID := util.GetUserIDFromLabels(existingPod.ObjectMeta.Labels)
 	owner := NewUser(userID, client)
-	cache := &podCache{
-		Tokens:            make(map[string]string),
-		OtherResourceInfo: make(map[string]string),
-	}
 	return Pod{
 		Object: existingPod,
 		Client: client,
 		Owner:  owner,
-		cache:  cache,
 	}
 }
 
@@ -283,10 +277,10 @@ func (p *Pod) GetPodInfo() PodInfo {
 	podInfo.PodName = p.Object.Name
 	podInfo.Status = fmt.Sprintf("%s:%s", p.Object.Status.Phase, startTimeStr)
 
-	err := p.loadPodCache()
+	cache, err := p.loadPodCache()
 	if err == nil {
-		podInfo.Tokens = p.cache.Tokens
-		podInfo.OtherResourceInfo = p.cache.OtherResourceInfo
+		podInfo.Tokens = cache.Tokens
+		podInfo.OtherResourceInfo = cache.OtherResourceInfo
 	}
 
 	// TODO get url from ingress
@@ -304,63 +298,6 @@ func (p *Pod) needsSshService() bool {
 		}
 	}
 	return listensSsh
-}
-
-// get the contents of /tmp/key inside the first container of the pod
-func (p *Pod) getTmpFile(key string) (string, error) {
-	var stdout, stderr bytes.Buffer
-	var err error
-	stdout, stderr, err = p.Client.PodExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, p.Object, 0)
-	if err != nil {
-		return "", errors.New(fmt.Sprintf("Couldn't call pod exec for pod %s: %s", p.Object.Name, err.Error()))
-	}
-	if stdout.Len() == 0 {
-		return "", errors.New(fmt.Sprintf("Empty response. Stderr: %s", stderr.String()))
-	}
-	// read the first tokenByteLimit bytes from the buffer
-	var readBytes []byte
-	if stdout.Len() < tokenByteLimit {
-		readBytes = stdout.Bytes()
-	} else {
-		readBytes = make([]byte, tokenByteLimit)
-		stdout.Read(readBytes)
-	}
-	return string(readBytes), nil
-}
-
-// attempt fill in p.cache.podTmpFiles[key] for each file /tmp/key in the running pod's first container
-func (p *Pod) fillAllTmpFiles(oneTry bool) {
-	var toCopy []string
-	for key, value := range p.Object.ObjectMeta.Annotations {
-		if value == "copyForFrontend" {
-			toCopy = append(toCopy, key)
-		}
-	}
-	for _, key := range toCopy {
-		var err error
-		if oneTry {
-			// if reloading tokens of pods that should already have created /tmp/key
-			p.cache.Tokens[key], err = p.getTmpFile(key)
-			if err != nil {
-				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
-			}
-		} else {
-			// give a new pod up to 10s to create /tmp/key before giving up
-			for i := 0; i < 10; i++ {
-				p.cache.Tokens[key], err = p.getTmpFile(key)
-				if err != nil {
-					time.Sleep(time.Second)
-					continue
-				} else {
-					break
-				}
-			}
-			// if it never succeeded, log the last error message
-			if err != nil {
-				fmt.Printf("Error while copying token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
-			}
-		}
-	}
 }
 
 func (p *Pod) ListServices() (*apiv1.ServiceList, error) {
@@ -398,24 +335,27 @@ func (p *Pod) getSshPort() (string, error) {
 }
 
 // fill p.cache.OtherResourceInfo with information about other k8s resources relevant to the pod
-func (p *Pod) fillOtherResourceInfo() {
+func (p *Pod) fillOtherResourceInfo() map[string]string {
+	otherResourceInfo := make(map[string]string)
 	if p.needsSshService() {
 		sshPort, err := p.getSshPort()
 		if err != nil {
 			fmt.Printf("Error while copying ssh port for pod %s: %s\n", p.Object.Name, err.Error())
 		} else {
-			p.cache.OtherResourceInfo["sshPort"] = sshPort
+			otherResourceInfo["sshPort"] = sshPort
 		}
 	}
 	// other information about related resources that should be cached for inclusion in GetPodInfo
 	// should be included here
+
+	return otherResourceInfo
 }
 
-func (p *Pod) savePodCache() error {
+func (p *Pod) savePodCache(cache podCache) error {
 	b := new(bytes.Buffer)
 	e := gob.NewEncoder(b)
 	// encode pod cache into the bytes buffer
-	err := e.Encode(p.cache)
+	err := e.Encode(cache)
 	if err != nil {
 		return err
 	}
@@ -437,21 +377,22 @@ func (p *Pod) savePodCache() error {
 	return nil
 }
 
-func (p *Pod) loadPodCache() error {
+func (p *Pod) loadPodCache() (podCache, error) {
+	var cache podCache
 	// create an io.Reader for the file
 	file, err := os.Open(p.getCacheFile())
 	if err != nil {
-		return err
+		return cache, err
 	}
 
 	d := gob.NewDecoder(file)
-	// decode the file's contents into p.cache
-	err = d.Decode(p.cache)
+	// decode the file's contents into `cache`
+	err = d.Decode(&cache)
 	if err != nil {
-		return err
+		return cache, err
 	}
 
-	return nil
+	return cache, nil
 }
 
 func (p *Pod) CheckState() {
@@ -459,10 +400,6 @@ func (p *Pod) CheckState() {
 	// if needs user storage, check that it's present
 	// if needsssh, check that it's present
 	// check that cache is filled
-}
-
-func (p *Pod) WatchForReady() {
-	// watch for pod status
 }
 
 func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.ReadyChannel) {
@@ -525,9 +462,14 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 	if p.needsSshService() {
 		p.startSshService()
 	}
-	p.copyAllTokens(false)
-	p.fillOtherResourceInfo()
-	err := p.savePodCache()
+	tokens := p.copyAllTokens(false)
+	otherResourceInfo := p.fillOtherResourceInfo()
+	err := p.savePodCache(
+		podCache{
+			Tokens:            tokens,
+			OtherResourceInfo: otherResourceInfo,
+		},
+	)
 	if err != nil {
 		fmt.Printf("Failed to save pod cache for pod %s: %s\n", p.Object.Name, err.Error())
 		finishedStartJobs.Send(false)
@@ -543,7 +485,8 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 // copy the token from the pod held in /tmp/key to the filesystem, ready to be served by getPods.
 // If reload is true, it will only attempt each token once,
 // otherwise, it will try a few times to give the pod time to create /tmp/key after starting
-func (p *Pod) copyAllTokens(reload bool) {
+func (p *Pod) copyAllTokens(reload bool) map[string]string {
+	tokenMap := make(map[string]string)
 	var toCopy []string
 	for key, value := range p.Object.ObjectMeta.Annotations {
 		if value == "copyForFrontend" {
@@ -552,40 +495,45 @@ func (p *Pod) copyAllTokens(reload bool) {
 	}
 	for _, key := range toCopy {
 		var err error
+		var token string
 		if reload {
 			// if reloading tokens of pods that should already have created /tmp/key
-			err = p.copyToken(key)
+			token, err = p.copyToken(key)
 			if err != nil {
 				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
 			}
 		} else {
 			// give a new pod up to 10s to create /tmp/key before giving up
 			for i := 0; i < 10; i++ {
-				err = p.copyToken(key)
+				token, err = p.copyToken(key)
 				if err != nil {
 					time.Sleep(1 * time.Second)
 				} else {
 					break
 				}
 			}
-			// if it never succeeded, log the last error message
-			if err != nil {
-				fmt.Printf("Error while copying token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
-			}
+		}
+		// if it never succeeded, log the last error message
+		if err != nil {
+			fmt.Printf("Error while copying token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
+		} else {
+			// If it got the token successfully, add it to the tokenMap
+			tokenMap[key] = token
 		}
 	}
+	return tokenMap
 }
 
 // Try to copy /tmp/"key" in the created pod into /tmp into p.cache.tokens
-func (p *Pod) copyToken(key string) error {
+func (p *Pod) copyToken(key string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	var err error
 	stdout, stderr, err = p.Client.PodExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, p.Object, 0)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't call pod exec for pod %s: %s", p.Object.Name, err.Error()))
+		return "", errors.New(fmt.Sprintf("Couldn't call pod exec for pod %s: %s", p.Object.Name, err.Error()))
 	}
 	if stdout.Len() == 0 {
-		return errors.New(fmt.Sprintf("Empty response. Stderr: %s", stderr.String()))
+		return "", errors.New(fmt.Sprintf("Empty response. Stderr: %s", stderr.String()))
 	}
 	// read the first tokenByteLimit bytes from the buffer
 	var readBytes []byte
@@ -595,8 +543,7 @@ func (p *Pod) copyToken(key string) error {
 		readBytes = make([]byte, tokenByteLimit)
 		stdout.Read(readBytes)
 	}
-	p.cache.Tokens[key] = string(readBytes)
-	return nil
+	return string(readBytes), nil
 }
 
 // Start the ssh service required by this pod

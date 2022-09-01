@@ -195,7 +195,7 @@ func TestPodData(t *testing.T) {
 	// For each of the user's pods,
 	for _, pod := range podList {
 		// double check that the saved cache matches environment variables
-		err := pod.loadPodCache()
+		cache, err := pod.loadPodCache()
 		if err != nil {
 			t.Fatalf("Couldn't load pod cache for pod %s", pod.Object.Name)
 		}
@@ -210,8 +210,8 @@ func TestPodData(t *testing.T) {
 		for key, value := range info.Tokens {
 			// try to re-copy the token from the running pod
 			pod.copyToken(key)
-			if value != pod.cache.Tokens[key] {
-				t.Fatalf("Cached token %s had value %s, but in the running pod %s is currently %s", key, value, object.Name, pod.cache.Tokens[key])
+			if value != cache.Tokens[key] {
+				t.Fatalf("Cached token %s had value %s, but in the running pod %s is currently %s", key, value, object.Name, cache.Tokens[key])
 			}
 		}
 		sshPort, exists := info.OtherResourceInfo["sshPort"]
