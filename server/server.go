@@ -268,7 +268,7 @@ func (s *Server) watchCreatePod(request WatchCreatePodRequest) (WatchCreatePodRe
 		return response, nil
 	}
 
-	// If there was no entry for this pod in `s.CreatingPods`, return true iff the pod exists and is owned by the user
+	// If there was no entry for this pod in `s.CreatingPods`, return true iff the pod exists and is owned by the user.
 	u := managed.NewUser(request.UserID, s.Client)
 	owned, err := u.OwnsPod(request.PodName)
 	if err != nil {
@@ -285,14 +285,14 @@ func (s *Server) ServeWatchCreatePod(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("watchCreatePod request %+v\n", request)
 
 	response, err := s.watchCreatePod(request)
-	status := http.StatusOK
+	// If there is an error, it may be internal, or it may be a user requesting for a pod they don't own.
+	// To avoid giving the user information about pods they don't own, return `false` without error in either case.
 	if err != nil {
 		fmt.Printf("Error watching pod: %s\n", err.Error())
-		status = http.StatusBadRequest
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -417,14 +417,12 @@ func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("watchDeletePod request %+v\n", request)
 
 	response, err := s.watchDeletePod(request)
-	status := http.StatusOK
 	if err != nil {
 		fmt.Printf("Error while watching for pod deletion: %s\n", err.Error())
-		status = http.StatusBadRequest
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 }
 

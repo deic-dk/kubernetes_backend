@@ -716,7 +716,8 @@ func TestWatchers(t *testing.T) {
 		t.Fatalf("Pod didn't reach ready state with completed start jobs")
 	}
 
-	// Now that it's finished, try watching it again, first with the correct user
+	// Now that it's finished, try watching it again, first with the correct user:
+	// Should have no error and return true
 	watchCreateResponse, err := s.watchCreatePod(correctCreateRequest)
 	if err != nil {
 		t.Fatalf("Error while watching for pod creation %s", err.Error())
@@ -724,10 +725,11 @@ func TestWatchers(t *testing.T) {
 	if !watchCreateResponse.Ready {
 		t.Fatalf("Got false when watching for pod creation when it should have returned true")
 	}
-	// and then with the incorrect user
+	// and then with the incorrect user:
+	// Should have error and return false
 	watchCreateResponse, err = s.watchCreatePod(incorrectCreateRequest)
 	if err == nil {
-		t.Fatalf("Didn't get error when watching for pod creating with incorrect user")
+		t.Fatalf("Didn't get error watching already created pod with incorrect user %s", err.Error())
 	}
 	if watchCreateResponse.Ready {
 		t.Fatalf("Got true when watching for pod creation with the incorrect userID")
@@ -769,7 +771,7 @@ func TestWatchers(t *testing.T) {
 	// Because it's deleted now, the username can't matter
 	watchDeleteResponse, err := s.watchDeletePod(correctDeleteRequest)
 	if err != nil {
-		t.Fatalf("Error while watching for pod creation %s", err.Error())
+		t.Fatalf("Error while watching for pod deletion %s", err.Error())
 	}
 	if !watchDeleteResponse.Deleted {
 		t.Fatalf("Got false when watching for pod deletion when it should have returned true")
