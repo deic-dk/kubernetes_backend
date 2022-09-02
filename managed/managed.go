@@ -461,30 +461,10 @@ func (p *Pod) CheckState() {
 	// check that cache is filled
 }
 
-func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.ReadyChannel) {
-	// wait for the signal that delete jobs can begin
-	// If ready.Receive() is false (due to timeout or failure),
-	// then signal false on finished channel, and do not attempt delete jobs
-	if !ready.Receive() {
-		finished.Send(false)
-		return
-	}
-
-	// Delete the cache file if it exists
-	err := os.Remove(p.getCacheFilename())
-	if err != nil {
-		// if there was an error other than that the file didn't exist, log it
-		if !os.IsNotExist(err) {
-			fmt.Printf("Error while deleting cache for pod %s: %s\n", p.Object.Name, err.Error())
-		}
-	}
-
-	// Delete all of the pod's related services
+func (p *Pod) DeleteAllServices(finished *util.ReadyChannel) error {
 	serviceList, err := p.ListServices()
 	if err != nil {
-		fmt.Printf("Error listing services for pod %s", err.Error())
-		finished.Send(false)
-		return
+		return errors.New(fmt.Sprintf("Couldn't list services for pod %s", err.Error()))
 	}
 	if len(serviceList.Items) > 0 {
 		deleteChannels := make([]*util.ReadyChannel, len(serviceList.Items))
@@ -507,6 +487,33 @@ func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.Re
 	} else {
 		finished.Send(true)
 	}
+	return nil
+}
+
+func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.ReadyChannel) {
+	// wait for the signal that delete jobs can begin
+	// If ready.Receive() is false (due to timeout or failure),
+	// then signal false on finished channel, and do not attempt delete jobs
+	if !ready.Receive() {
+		finished.Send(false)
+		return
+	}
+
+	// Delete the cache file if it exists
+	err := os.Remove(p.getCacheFilename())
+	if err != nil {
+		// if there was an error other than that the file didn't exist, log it
+		if !os.IsNotExist(err) {
+			fmt.Printf("Error while deleting cache for pod %s: %s\n", p.Object.Name, err.Error())
+		}
+	}
+
+	// Delete all of the pod's related services
+	err = p.DeleteAllServices(finished)
+	if err != nil {
+		fmt.Printf("Error deleting services: %s", err.Error())
+		finished.Send(false)
+	}
 }
 
 // Wait until each channel in requiredToStartJobs has an input,
@@ -522,13 +529,28 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 		return
 	}
 
+	// Ensure no orphaned services for deleted pods with this pod's name
+	cleanedOrphanedServices := util.NewReadyChannel(p.Client.TimeoutDelete)
+	err := p.DeleteAllServices(cleanedOrphanedServices)
+	if err != nil {
+		fmt.Printf("Error cleaning up orphaned services %s", err.Error())
+		finishedStartJobs.Send(false)
+		return
+	}
+	if !cleanedOrphanedServices.Receive() {
+		fmt.Printf("Couldn't ensure orphaned services were removed for pod %s, didn't continue start jobs", p.Object.Name)
+		finishedStartJobs.Send(false)
+		return
+	}
+
 	// Perform start jobs here
+
 	if p.needsSshService() {
 		p.startSshService()
 	}
 	tokens := p.getAllTokens(false)
 	otherResourceInfo := p.getOtherResourceInfo()
-	err := p.savePodCache(
+	err = p.savePodCache(
 		podCache{
 			Tokens:            tokens,
 			OtherResourceInfo: otherResourceInfo,

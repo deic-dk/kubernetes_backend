@@ -9,9 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	apiv1 "k8s.io/api/core/v1"
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
@@ -104,6 +107,29 @@ func createBasicPod(podType string) error {
 		return errors.New(fmt.Sprintf("Pod didn't reach ready state with completed start jobs"))
 	}
 	return nil
+}
+
+func exampleSshService(podName string, publicIP string) *apiv1.Service {
+	return &apiv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-ssh", podName),
+			Labels: map[string]string{
+				"createdForPod": podName,
+			},
+		},
+		Spec: apiv1.ServiceSpec{
+			Ports: []apiv1.ServicePort{
+				{
+					Name:       "ssh",
+					Protocol:   apiv1.ProtocolTCP,
+					Port:       22,
+					TargetPort: intstr.FromInt(22),
+				},
+			},
+			Type:        apiv1.ServiceTypeLoadBalancer,
+			ExternalIPs: []string{publicIP},
+		},
+	}
 }
 
 func ensureUserHasNPods(n int) error {
@@ -747,6 +773,102 @@ func TestWatchers(t *testing.T) {
 	}
 	if !watchDeleteResponse.Deleted {
 		t.Fatalf("Got false when watching for pod deletion when it should have returned true")
+	}
+}
+
+func TestCleanAllUnused(t *testing.T) {
+	s := New(*k8sclient.NewK8sClient())
+
+	t.Logf("Making some junk user storage, services, and podcaches to attempt to delete")
+	// Make some junk user storage, services, and podcaches
+	testUsernames := []string{"foo@bar", "foo@bar.baz", "foo"}
+	readyChannels := make([]*util.ReadyChannel, len(testUsernames))
+	for i, user := range testUsernames {
+		u := managed.NewUser(user, s.Client)
+		ready := util.NewReadyChannel(s.Client.TimeoutCreate)
+		err := u.CreateUserStorageIfNotExist(ready, remoteIP)
+		if err != nil {
+			t.Fatalf("Couldn't create storage for user %s, %s", user, err.Error())
+		}
+		readyChannels[i] = ready
+	}
+	if !util.ReceiveReadyChannels(readyChannels) {
+		t.Fatalf("Not all storages were created")
+	}
+
+	testPodNames := []string{"coolpod-1", "example-pod-foo-bar"}
+	var testServices []*apiv1.Service
+	for _, name := range testPodNames {
+		service := exampleSshService(name, s.Client.PublicIP)
+		testServices = append(testServices, service)
+		// make the podcache
+		filename := fmt.Sprintf("%s/%s", s.Client.TokenDir, name)
+		file, err := os.Create(filename)
+		if err != nil {
+			t.Fatalf("Couldn't create file %s, %s", filename, err.Error())
+		}
+		file.Close()
+		if err != nil {
+			t.Fatalf("Couldn't close file %s, %s", filename, err.Error())
+		}
+		// make the service
+		_, err = s.Client.CreateService(service)
+		if err != nil {
+			t.Fatalf("Couldn't create service %s, %s", service.Name, err.Error())
+		}
+	}
+
+	t.Log("Clean all unused now")
+	finished := util.NewReadyChannel(3 * s.Client.TimeoutDelete)
+	err := s.cleanAllUnused(finished)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	if !finished.Receive() {
+		t.Fatal("Didn't finish cleanAllUnused successfully")
+	}
+
+	t.Log("Checking whether all were deleted")
+
+	// Check user storage
+	for _, user := range testUsernames {
+		u := managed.NewUser(user, s.Client)
+		pvList, err := s.Client.ListPV(u.GetStorageListOptions())
+		if err != nil {
+			t.Fatal(err.Error())
+		}
+		if len(pvList.Items) != 0 {
+			t.Fatalf("PV %s wasn't deleted", pvList.Items[0].Name)
+		}
+		pvcList, err := s.Client.ListPVC(u.GetStorageListOptions())
+		if err != nil {
+			t.Fatal(err.Error())
+		}
+		if len(pvcList.Items) != 0 {
+			t.Fatalf("PVC %s wasn't deleted", pvcList.Items[0].Name)
+		}
+	}
+
+	// Check podcaches
+	for _, podName := range testPodNames {
+		filename := fmt.Sprintf("%s/%s", s.Client.TokenDir, podName)
+		_, err := os.Stat(filename)
+		if !os.IsNotExist(err) {
+			t.Fatalf("Podcache %s was not deleted", filename)
+		}
+	}
+
+	// Check services
+	for _, service := range testServices {
+		svcList, err := s.Client.ListServices(
+			metav1.ListOptions{FieldSelector: fmt.Sprintf("metadata.name=%s", service.Name)},
+		)
+		if err != nil {
+			t.Fatal(err.Error())
+		}
+		if len(svcList.Items) != 0 {
+			t.Fatalf("Service %s was not deleted", svcList.Items[0].Name)
+		}
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
@@ -12,6 +14,7 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/podcreator"
 	"github.com/deic.dk/user_pods_k8s_backend/poddeleter"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type GetPodsRequest struct {
@@ -499,4 +502,124 @@ func (s *Server) ServeDeleteAllUserPods(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
+	var taskChannelList []*util.ReadyChannel
+
+	// Clean orphaned services.
+	// Find all the services that were created for a pod.
+	serviceList, err := s.Client.ListServices(
+		metav1.ListOptions{LabelSelector: "createdForPod"},
+	)
+	if err != nil {
+		return err
+	}
+	// For all of the services that belong to a pod,
+	for _, service := range serviceList.Items {
+		podName, exists := service.Labels["createdForPod"]
+		if !exists {
+			return errors.New(fmt.Sprintf("Service %s didn't have createdForPod label", service.Name))
+		}
+		podList, err := s.Client.ListPods(
+			metav1.ListOptions{FieldSelector: fmt.Sprintf("metadata.name=%s", podName)},
+		)
+		if err != nil {
+			return err
+		}
+		// If the pod that the service was created for no longer exists, then delete the service
+		if len(podList.Items) == 0 {
+			ch := util.NewReadyChannel(s.Client.TimeoutDelete)
+			taskChannelList = append(taskChannelList, ch)
+			// Make a watcher that will announce its deletion
+			go func() {
+				s.Client.WatchDeleteService(service.Name, ch)
+				if ch.Receive() {
+					fmt.Printf("Deleted SVC %s\n", service.Name)
+				} else {
+					fmt.Printf("Warning: failed to delete SVC %s\n", service.Name)
+				}
+			}()
+			s.Client.DeleteService(service.Name)
+		}
+	}
+
+	// Clean orphaned user storage.
+	// Check for all PVCs (not PVs!) because they are namespaced
+	pvcList, err := s.Client.ListPVC(metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	// For all of the persistent volume claims in this namespace,
+	for _, pvc := range pvcList.Items {
+		// If the pvc is for user storage
+		if strings.Contains(pvc.Name, "user-storage") {
+			u := managed.NewUser(util.GetUserIDFromLabels(pvc.Labels), s.Client)
+			userPodList, err := u.ListPods()
+			if err != nil {
+				return err
+			}
+			// If the user who owns this PVC doesn't have any pods, then delete the storage
+			if len(userPodList) == 0 {
+				ch := util.NewReadyChannel(s.Client.TimeoutDelete)
+				err := u.DeleteUserStorage(ch)
+				if err != nil {
+					return err
+				}
+				taskChannelList = append(taskChannelList, ch)
+			}
+		}
+	}
+
+	// Clean up pod caches
+	// Get a list of every filename in tokenDir
+	dir, err := os.Open(s.Client.TokenDir)
+	if err != nil {
+		return err
+	}
+	fileNames, err := dir.Readdirnames(0)
+	if err != nil {
+		return err
+	}
+	// For each file in tokenDir, check if it belongs to a pod that doesn't exist
+	for _, fileName := range fileNames {
+		podList, err := s.Client.ListPods(
+			metav1.ListOptions{FieldSelector: fmt.Sprintf("metadata.name=%s", fileName)},
+		)
+		if err != nil {
+			return err
+		}
+		// If there is no pod whose name matches this file, then it is an orphaned podcache
+		if len(podList.Items) == 0 {
+			err := os.Remove(fmt.Sprintf("%s/%s", s.Client.TokenDir, fileName))
+			if err != nil {
+				return errors.New(fmt.Sprintf("Couldn't delete orphaned podcache %s: %s", fileName, err.Error()))
+			}
+		}
+	}
+	go util.CombineReadyChannels(taskChannelList, finished)
+
+	return nil
+}
+
+func (s *Server) ServeCleanAllUnused(w http.ResponseWriter, r *http.Request) {
+	remoteIP := util.GetRemoteIP(r)
+	fmt.Printf("Clean all request from IP %s", remoteIP)
+	// Could limit this to a whitelisted IP range
+
+	finished := util.NewReadyChannel(3 * s.Client.TimeoutDelete)
+	err := s.cleanAllUnused(finished)
+	status := http.StatusOK
+	if err != nil {
+		fmt.Printf("Error during cleanAllUnused: %s\n", err.Error())
+		status = http.StatusBadRequest
+	} else {
+		if !finished.Receive() {
+			fmt.Printf("Warning: cleanAllUnused didn't finish successfully\n")
+			status = http.StatusBadRequest
+		}
+	}
+
+	// write the response
+	w.WriteHeader(status)
 }
