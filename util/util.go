@@ -188,5 +188,21 @@ func MustLoadGlobalConfig() GlobalConfig {
 		panic(fmt.Sprintf("Invalid WhitelistManifestRegex in config: %s", err.Error()))
 	}
 
+	// Check that RestartPolicy is an allowed value
+	switch config.RestartPolicy {
+	case apiv1.RestartPolicyAlways:
+	case apiv1.RestartPolicyOnFailure:
+	case apiv1.RestartPolicyNever:
+	case "":
+	default:
+		panic(fmt.Sprintf("Invalid restart policy. Must be \"Always\", \"OnFailure\", \"Never\", or empty"))
+	}
+
+	// Check that PublicIP is an IP address (currently only v4)
+	ipRegex := regexp.MustCompile(`^(\d{1,3}[.]){3}\d{1,3}$`)
+	if !ipRegex.MatchString(config.PublicIP) {
+		panic(fmt.Sprintf("Public IP %s not a valid ip address", config.PublicIP))
+	}
+
 	return config
 }
