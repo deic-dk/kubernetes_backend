@@ -11,14 +11,15 @@ import (
 )
 
 type PodDeleter struct {
-	podName string
-	Pod     managed.Pod
-	userID  string
-	client  k8sclient.K8sClient
+	podName      string
+	Pod          managed.Pod
+	userID       string
+	client       k8sclient.K8sClient
+	globalConfig util.GlobalConfig
 }
 
-func NewPodDeleter(podName string, userID string, client k8sclient.K8sClient) (PodDeleter, error) {
-	deleter := PodDeleter{podName: podName, userID: userID, client: client}
+func NewPodDeleter(podName string, userID string, client k8sclient.K8sClient, globalConfig util.GlobalConfig) (PodDeleter, error) {
+	deleter := PodDeleter{podName: podName, userID: userID, client: client, globalConfig: globalConfig}
 	err := deleter.initPodObject()
 	if err != nil {
 		return deleter, err
@@ -27,7 +28,7 @@ func NewPodDeleter(podName string, userID string, client k8sclient.K8sClient) (P
 }
 
 func NewFromPod(pod managed.Pod) PodDeleter {
-	return PodDeleter{podName: pod.Object.Name, userID: pod.Owner.UserID, client: pod.Client, Pod: pod}
+	return PodDeleter{podName: pod.Object.Name, userID: pod.Owner.UserID, client: pod.Client, Pod: pod, globalConfig: pod.GlobalConfig}
 }
 
 func (pd *PodDeleter) initPodObject() error {
@@ -41,7 +42,7 @@ func (pd *PodDeleter) initPodObject() error {
 	if len(podList.Items) < 1 {
 		return errors.New(fmt.Sprintf("Didn't find pod by name %s", pd.podName))
 	}
-	pod := managed.NewPod(&podList.Items[0], pd.client)
+	pod := managed.NewPod(&podList.Items[0], pd.client, pd.globalConfig)
 	if pod.Owner.UserID != pd.userID {
 		return errors.New(fmt.Sprintf("Pod %s not owned by user %s", pd.podName, pd.userID))
 	}
@@ -50,7 +51,7 @@ func (pd *PodDeleter) initPodObject() error {
 }
 
 func (pd *PodDeleter) DeletePod(finished *util.ReadyChannel) error {
-	podDeleted := util.NewReadyChannel(pd.client.TimeoutDelete)
+	podDeleted := util.NewReadyChannel(pd.globalConfig.TimeoutDelete)
 	go func() {
 		pd.client.WatchDeletePod(pd.podName, podDeleted)
 		if podDeleted.Receive() {

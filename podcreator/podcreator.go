@@ -16,9 +16,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 )
 
-// TODO move this to a config file
-const whitelistYamlRegex = "https:\\/\\/raw[.]githubusercontent[.]com\\/deic-dk\\/pod_manifests"
-
 type PodCreator struct {
 	targetPod        *apiv1.Pod
 	yamlURL          string
@@ -26,6 +23,7 @@ type PodCreator struct {
 	siloIP           string
 	containerEnvVars map[string]map[string]string
 	client           k8sclient.K8sClient
+	globalConfig     util.GlobalConfig
 }
 
 // Initialization functions
@@ -36,17 +34,19 @@ type PodCreator struct {
 // Return without error if it is ready to call CreatePod()
 func NewPodCreator(
 	yamlURL string,
-	user managed.User,
+	userID string,
 	siloIP string,
 	containerEnvVars map[string]map[string]string,
 	client k8sclient.K8sClient,
+	globalConfig util.GlobalConfig,
 ) (PodCreator, error) {
 	creator := PodCreator{
 		yamlURL:          yamlURL,
-		user:             user,
+		user:             managed.NewUser(userID, client, globalConfig),
 		siloIP:           siloIP,
 		containerEnvVars: containerEnvVars,
 		client:           client,
+		globalConfig:     globalConfig,
 		targetPod:        nil,
 	}
 	err := creator.initTargetPod()
@@ -101,6 +101,8 @@ func (pc *PodCreator) initTargetPod() error {
 
 	// Fill in values in targetPodObject according to the request
 	pc.applyCreatePodSettings(&targetPod)
+	// Fill in values in targetPodObject that are independent of the request
+	pc.applyMandatorySettings(&targetPod)
 	// Find and set a unique podName in the format pod.metadata.name-user-domain-x
 	err = pc.applyCreatePodName(&targetPod)
 	if err != nil {
@@ -117,7 +119,7 @@ func (pc *PodCreator) initTargetPod() error {
 
 // Retrieve the yaml manifest from a URL matching the whitelist
 func (pc *PodCreator) getYaml() (string, error) {
-	allowed, err := regexp.MatchString(whitelistYamlRegex, pc.yamlURL)
+	allowed, err := regexp.MatchString(pc.globalConfig.WhitelistManifestRegex, pc.yamlURL)
 	if err != nil {
 		return "", err
 	}
@@ -143,22 +145,13 @@ func (pc *PodCreator) getYaml() (string, error) {
 	return string(body), nil
 }
 
-func (pc *PodCreator) applyCreatePodSettings(targetPodObject *apiv1.Pod) {
-	for i, container := range targetPodObject.Spec.Containers {
-		envVars, exist := pc.containerEnvVars[container.Name]
-		// if there are settings for this container (if container.Name is a key in request.ContainerEnvVars)
-		if exist {
-			// then for each setting,
-			for name, value := range envVars {
-				// find the env entry with a matching name, and set the value
-				for ii, env := range container.Env {
-					if env.Name == name {
-						targetPodObject.Spec.Containers[i].Env[ii].Value = value
-					}
-				}
-			}
-		}
-		// for each envvar that should be set in every container,
+// Apply all settings that are mandatory for each pod, independent of the request or manifest
+func (pc *PodCreator) applyMandatorySettings(targetPodObject *apiv1.Pod) {
+	// Set the restart policy from the global config
+	targetPodObject.Spec.RestartPolicy = pc.globalConfig.RestartPolicy
+
+	// Set environment variables in each container
+	for i, _ := range targetPodObject.Spec.Containers {
 		for name, value := range pc.getMandatoryEnvVars() {
 			overwrite := false
 			// try to overwrite the value if the var already exists
@@ -174,6 +167,24 @@ func (pc *PodCreator) applyCreatePodSettings(targetPodObject *apiv1.Pod) {
 					Name:  name,
 					Value: value,
 				})
+			}
+		}
+	}
+}
+
+func (pc *PodCreator) applyCreatePodSettings(targetPodObject *apiv1.Pod) {
+	for i, container := range targetPodObject.Spec.Containers {
+		envVars, exist := pc.containerEnvVars[container.Name]
+		// if there are settings for this container (if container.Name is a key in request.ContainerEnvVars)
+		if exist {
+			// then for each setting,
+			for name, value := range envVars {
+				// find the env entry with a matching name, and set the value
+				for ii, env := range container.Env {
+					if env.Name == name {
+						targetPodObject.Spec.Containers[i].Env[ii].Value = value
+					}
+				}
 			}
 		}
 	}
@@ -278,14 +289,14 @@ func (pc *PodCreator) CreatePod(ready *util.ReadyChannel) (managed.Pod, error) {
 		return pod, errors.New("PodCreater wasn't initialized with a targetPod, cannot create empty target.")
 	}
 
-	storageReady := util.NewReadyChannel(pc.client.TimeoutCreate)
+	storageReady := util.NewReadyChannel(pc.globalConfig.TimeoutCreate)
 	if pc.requiresUserStorage() {
 		pc.user.CreateUserStorageIfNotExist(storageReady, pc.siloIP)
 	} else {
 		storageReady.Send(true)
 	}
 
-	podReady := util.NewReadyChannel(pc.client.TimeoutCreate)
+	podReady := util.NewReadyChannel(pc.globalConfig.TimeoutCreate)
 	go func() {
 		pc.client.WatchCreatePod(pc.targetPod.Name, podReady)
 		if podReady.Receive() {
@@ -299,7 +310,7 @@ func (pc *PodCreator) CreatePod(ready *util.ReadyChannel) (managed.Pod, error) {
 	if err != nil {
 		return pod, errors.New(fmt.Sprintf("Call to create pod %s failed: %s", pc.targetPod.Name, err.Error()))
 	}
-	pod = managed.NewPod(createdPod, pc.client)
+	pod = managed.NewPod(createdPod, pc.client, pc.globalConfig)
 
 	startJobWaitChans := make([]*util.ReadyChannel, 2)
 	startJobWaitChans[0] = storageReady
@@ -319,4 +330,3 @@ func (pc *PodCreator) requiresUserStorage() bool {
 	}
 	return req
 }
-

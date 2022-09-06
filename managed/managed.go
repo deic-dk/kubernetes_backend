@@ -19,29 +19,26 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-const (
-	tokenByteLimit = 4096
-	nfsStorageRoot = "/tank/storage"
-)
-
 type User struct {
-	UserID string
-	Name   string
-	Domain string
-	Client k8sclient.K8sClient
+	UserID       string
+	Name         string
+	Domain       string
+	Client       k8sclient.K8sClient
+	GlobalConfig util.GlobalConfig
 }
 
-func NewUser(userID string, client k8sclient.K8sClient) User {
+func NewUser(userID string, client k8sclient.K8sClient, globalConfig util.GlobalConfig) User {
 	if userID == "" {
 		return User{Client: client}
 	}
 
 	name, domain, _ := strings.Cut(userID, "@")
 	return User{
-		UserID: userID,
-		Name:   name,
-		Domain: domain,
-		Client: client,
+		UserID:       userID,
+		Name:         name,
+		Domain:       domain,
+		Client:       client,
+		GlobalConfig: globalConfig,
 	}
 }
 
@@ -61,7 +58,7 @@ func (u *User) ListPods() ([]Pod, error) {
 	}
 	pods = make([]Pod, len(podList.Items))
 	for i := 0; i < len(podList.Items); i++ {
-		pod := NewPod(&podList.Items[i], u.Client)
+		pod := NewPod(&podList.Items[i], u.Client, u.GlobalConfig)
 		if pod.Owner.UserID == u.UserID {
 			pods[i] = pod
 		} else {
@@ -99,7 +96,7 @@ func (u *User) GetStorageListOptions() metav1.ListOptions {
 }
 
 func (u *User) getNfsStoragePath() string {
-	return fmt.Sprintf("%s/%s", nfsStorageRoot, u.UserID)
+	return fmt.Sprintf("%s/%s", u.GlobalConfig.NfsStorageRoot, u.UserID)
 }
 
 // Generate an api object for the PV to attempt to create for the user's nfs storage
@@ -131,7 +128,7 @@ func (u *User) GetTargetStoragePV(nfsIP string) *apiv1.PersistentVolume {
 				},
 			},
 			ClaimRef: &apiv1.ObjectReference{
-				Namespace: u.Client.Namespace,
+				Namespace: u.GlobalConfig.Namespace,
 				Name:      u.GetStoragePVName(),
 				Kind:      "PersistentVolumeClaim",
 			},
@@ -146,7 +143,7 @@ func (u *User) GetTargetStoragePV(nfsIP string) *apiv1.PersistentVolume {
 func (u *User) GetTargetStoragePVC(nfsIP string) *apiv1.PersistentVolumeClaim {
 	return &apiv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: u.Client.Namespace,
+			Namespace: u.GlobalConfig.Namespace,
 			Name:      u.GetStoragePVName(),
 			Labels: map[string]string{
 				"name":   u.GetStoragePVName(),
@@ -174,7 +171,7 @@ func (u *User) GetTargetStoragePVC(nfsIP string) *apiv1.PersistentVolumeClaim {
 func (u *User) DeleteUserStorage(finished *util.ReadyChannel) error {
 	pvName := u.GetStoragePVName()
 	// Start a watcher for PV deletion,
-	pvChan := util.NewReadyChannel(u.Client.TimeoutDelete)
+	pvChan := util.NewReadyChannel(u.GlobalConfig.TimeoutDelete)
 	// Then try to delete the PV.
 	err := u.Client.DeletePV(pvName)
 	// If there is an error,
@@ -197,7 +194,7 @@ func (u *User) DeleteUserStorage(finished *util.ReadyChannel) error {
 	}
 
 	// Repeat for the PVC
-	pvcChan := util.NewReadyChannel(u.Client.TimeoutDelete)
+	pvcChan := util.NewReadyChannel(u.GlobalConfig.TimeoutDelete)
 	err = u.Client.DeletePVC(pvName)
 	if err != nil {
 		if regexp.MustCompile(fmt.Sprintf("\"%s\" not found", pvName)).MatchString(err.Error()) {
@@ -224,8 +221,8 @@ func (u *User) DeleteUserStorage(finished *util.ReadyChannel) error {
 // Check that the PV and PVC for the user's nfs storage exist and create them if not
 func (u *User) CreateUserStorageIfNotExist(ready *util.ReadyChannel, nfsIP string) error {
 	listOptions := u.GetStorageListOptions()
-	PVready := util.NewReadyChannel(u.Client.TimeoutCreate)
-	PVCready := util.NewReadyChannel(u.Client.TimeoutCreate)
+	PVready := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
+	PVCready := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
 	PVList, err := u.Client.ListPV(listOptions)
 	if err != nil {
 		return err
@@ -296,23 +293,25 @@ type PodInfo struct {
 }
 
 type Pod struct {
-	Object *apiv1.Pod
-	Owner  User
-	Client k8sclient.K8sClient
+	Object       *apiv1.Pod
+	Owner        User
+	Client       k8sclient.K8sClient
+	GlobalConfig util.GlobalConfig
 }
 
-func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient) Pod {
+func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient, globalConfig util.GlobalConfig) Pod {
 	userID := util.GetUserIDFromLabels(existingPod.ObjectMeta.Labels)
-	owner := NewUser(userID, client)
+	owner := NewUser(userID, client, globalConfig)
 	return Pod{
-		Object: existingPod,
-		Client: client,
-		Owner:  owner,
+		Object:       existingPod,
+		Client:       client,
+		Owner:        owner,
+		GlobalConfig: globalConfig,
 	}
 }
 
 func (p *Pod) getCacheFilename() string {
-	return fmt.Sprintf("%s/%s", p.Client.TokenDir, p.Object.Name)
+	return fmt.Sprintf("%s/%s", p.GlobalConfig.TokenDir, p.Object.Name)
 }
 
 func (p *Pod) GetPodInfo() PodInfo {
@@ -470,7 +469,7 @@ func (p *Pod) DeleteAllServices(finished *util.ReadyChannel) error {
 		deleteChannels := make([]*util.ReadyChannel, len(serviceList.Items))
 		// For each service, call for deletion and add a watcher channel to the list of deleteChannels
 		for i, service := range serviceList.Items {
-			ch := util.NewReadyChannel(p.Client.TimeoutDelete)
+			ch := util.NewReadyChannel(p.GlobalConfig.TimeoutDelete)
 			deleteChannels[i] = ch
 			go func() {
 				p.Client.WatchDeleteService(service.Name, ch)
@@ -530,7 +529,7 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 	}
 
 	// Ensure no orphaned services for deleted pods with this pod's name
-	cleanedOrphanedServices := util.NewReadyChannel(p.Client.TimeoutDelete)
+	cleanedOrphanedServices := util.NewReadyChannel(p.GlobalConfig.TimeoutDelete)
 	err := p.DeleteAllServices(cleanedOrphanedServices)
 	if err != nil {
 		fmt.Printf("Error cleaning up orphaned services %s", err.Error())
@@ -623,10 +622,10 @@ func (p *Pod) getToken(key string) (string, error) {
 	}
 	// read the first tokenByteLimit bytes from the buffer
 	var readBytes []byte
-	if stdout.Len() < tokenByteLimit {
+	if stdout.Len() < p.GlobalConfig.TokenByteLimit {
 		readBytes = stdout.Bytes()
 	} else {
-		readBytes = make([]byte, tokenByteLimit)
+		readBytes = make([]byte, p.GlobalConfig.TokenByteLimit)
 		stdout.Read(readBytes)
 	}
 	return string(readBytes), nil
@@ -664,7 +663,7 @@ func (p *Pod) getTargetSshService() *apiv1.Service {
 			},
 			Type:        apiv1.ServiceTypeLoadBalancer,
 			Selector:    p.Object.ObjectMeta.Labels,
-			ExternalIPs: []string{p.Client.PublicIP},
+			ExternalIPs: []string{p.GlobalConfig.PublicIP},
 		},
 	}
 }

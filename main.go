@@ -6,11 +6,13 @@ import (
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/server"
+	"github.com/deic.dk/user_pods_k8s_backend/util"
 )
 
 func main() {
-	k8sClient := k8sclient.NewK8sClient()
-	server := server.New(*k8sClient)
+	globalConfig := util.MustLoadGlobalConfig()
+	k8sClient := k8sclient.NewK8sClient(globalConfig)
+	server := server.New(k8sClient, globalConfig)
 
 	http.HandleFunc("/get_pods", server.ServeGetPods)
 	http.HandleFunc("/create_pod", server.ServeCreatePod)

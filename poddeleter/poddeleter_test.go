@@ -18,8 +18,14 @@ const (
 	testUser = "registeredtest7"
 )
 
+func newUser(uid string) managed.User {
+	config := util.MustLoadGlobalConfig()
+	client := k8sclient.NewK8sClient(config)
+	return managed.NewUser(uid, client, config)
+}
+
 func ensureUserHasPodOfType(podType string) error {
-	u := managed.NewUser(testUser, *k8sclient.NewK8sClient())
+	u := newUser(testUser)
 	userPodList, err := u.ListPods()
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list user pods %s", err.Error()))
@@ -48,13 +54,13 @@ func TestDeletePod(t *testing.T) {
 	}
 
 	// Then delete all of the users pods, and for each of them, check that poddeleter works correctly
-	u := managed.NewUser(testUser, *k8sclient.NewK8sClient())
+	u := newUser(testUser)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 	for _, pod := range podList {
-		pd, err := NewPodDeleter(pod.Object.Name, testUser, u.Client)
+		pd, err := NewPodDeleter(pod.Object.Name, testUser, u.Client, u.GlobalConfig)
 		if err != nil {
 			t.Fatalf("Couldn't initialize pod deleter %s", err.Error())
 		}

@@ -18,6 +18,12 @@ const (
 	remoteIP = "10.0.0.20"
 )
 
+func newUser(uid string) User {
+	config := util.MustLoadGlobalConfig()
+	client := k8sclient.NewK8sClient(config)
+	return NewUser(uid, client, config)
+}
+
 // Test user functions
 func TestNewUser(t *testing.T) {
 	userIDs := []string{
@@ -27,7 +33,7 @@ func TestNewUser(t *testing.T) {
 		"foo.bar@baz",
 	}
 	for _, uid := range userIDs {
-		u := NewUser(uid, *k8sclient.NewK8sClient())
+		u := newUser(uid)
 		labels := map[string]string{"user": u.Name, "domain": u.Domain}
 		if u.UserID != util.GetUserIDFromLabels(labels) {
 			t.Fatalf("User contstructed incorrectly with userID %s", uid)
@@ -36,14 +42,13 @@ func TestNewUser(t *testing.T) {
 }
 
 func TestListOptions(t *testing.T) {
-	c := *k8sclient.NewK8sClient()
 	tests := []struct {
 		input User
 		want  metav1.ListOptions
 	}{
-		{NewUser("foo", c), metav1.ListOptions{LabelSelector: "user=foo,domain="}},
-		{NewUser("foo@bar", c), metav1.ListOptions{LabelSelector: "user=foo,domain=bar"}},
-		{NewUser("foo@bar.baz", c), metav1.ListOptions{LabelSelector: "user=foo,domain=bar.baz"}},
+		{newUser("foo"), metav1.ListOptions{LabelSelector: "user=foo,domain="}},
+		{newUser("foo@bar"), metav1.ListOptions{LabelSelector: "user=foo,domain=bar"}},
+		{newUser("foo@bar.baz"), metav1.ListOptions{LabelSelector: "user=foo,domain=bar.baz"}},
 	}
 	for _, test := range tests {
 		if test.input.GetListOptions() != test.want {
@@ -53,7 +58,7 @@ func TestListOptions(t *testing.T) {
 }
 
 func TestListPods(t *testing.T) {
-	u := NewUser(testUser, *k8sclient.NewK8sClient())
+	u := newUser(testUser)
 	// Use u.ListPods
 	podList, err := u.ListPods()
 	if err != nil {
@@ -82,7 +87,7 @@ func TestListPods(t *testing.T) {
 }
 
 func TestOwnership(t *testing.T) {
-	u := NewUser(testUser, *k8sclient.NewK8sClient())
+	u := newUser(testUser)
 	// Use u.ListPods
 	podList, err := u.ListPods()
 	if err != nil {
@@ -113,17 +118,16 @@ func TestOwnership(t *testing.T) {
 }
 
 func TestUserString(t *testing.T) {
-	c := *k8sclient.NewK8sClient()
 	tests := []struct {
 		input User
 		want  string
 	}{
-		{NewUser("foo", c), "foo"},
-		{NewUser("foo@bar", c), "foo-bar"},
-		{NewUser("Foo@Bar", c), "Foo-Bar"},
-		{NewUser("foo@bar.baz", c), "foo-bar-baz"},
-		{NewUser("foo@bar.baz-baz", c), "foo-bar-baz-baz"},
-		{NewUser("foo.bar@bar.baz", c), "foo-bar-bar-baz"},
+		{newUser("foo"), "foo"},
+		{newUser("foo@bar"), "foo-bar"},
+		{newUser("Foo@Bar"), "Foo-Bar"},
+		{newUser("foo@bar.baz"), "foo-bar-baz"},
+		{newUser("foo@bar.baz-baz"), "foo-bar-baz-baz"},
+		{newUser("foo.bar@bar.baz"), "foo-bar-bar-baz"},
 	}
 	for _, test := range tests {
 		if test.input.GetUserString() != test.want {
@@ -134,7 +138,7 @@ func TestUserString(t *testing.T) {
 
 func TestCreateDeleteUserStorage(t *testing.T) {
 	// It should return without error and receive true for a user whose storage doesn't exist
-	u := NewUser("foo@bar.baz", *k8sclient.NewK8sClient())
+	u := newUser("foo@bar.baz")
 	finished := util.NewReadyChannel(time.Second)
 	err := u.DeleteUserStorage(finished)
 	if err != nil {
@@ -145,7 +149,7 @@ func TestCreateDeleteUserStorage(t *testing.T) {
 	}
 
 	// Create storage for this user
-	ready := util.NewReadyChannel(30 * time.Second)
+	ready := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
 	err = u.CreateUserStorageIfNotExist(ready, remoteIP)
 	if err != nil {
 		t.Fatalf("Failed to create user storage %s", err.Error())
@@ -183,10 +187,8 @@ func TestCreateDeleteUserStorage(t *testing.T) {
 		t.Fatalf("Created PV not bound")
 	}
 
-
-
 	// Now that the user storage does exist, it should be possible to delete
-	finished = util.NewReadyChannel(30 * time.Second)
+	finished = util.NewReadyChannel(u.GlobalConfig.TimeoutDelete)
 	err = u.DeleteUserStorage(finished)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -209,8 +211,8 @@ func TestUserStorageValidity(t *testing.T) {
 	// Create the storage for each userName
 	var readyList []*util.ReadyChannel
 	for _, userName := range userNames {
-		u := NewUser(userName, *k8sclient.NewK8sClient())
-		ready := util.NewReadyChannel(30 * time.Second)
+		u := newUser(userName)
+		ready := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
 		err := u.CreateUserStorageIfNotExist(ready, remoteIP)
 		if err != nil {
 			t.Fatalf("Couldn't create storage for user %s: %s", userName, err.Error())
@@ -224,8 +226,8 @@ func TestUserStorageValidity(t *testing.T) {
 	// Delete the storage for each userName
 	var finishedList []*util.ReadyChannel
 	for _, userName := range userNames {
-		u := NewUser(userName, *k8sclient.NewK8sClient())
-		finished := util.NewReadyChannel(30 * time.Second)
+		u := newUser(userName)
+		finished := util.NewReadyChannel(u.GlobalConfig.TimeoutDelete)
 		err := u.DeleteUserStorage(finished)
 		if err != nil {
 			t.Fatalf("Couldn't delete storage for user %s: %s", userName, err.Error())
@@ -238,7 +240,7 @@ func TestUserStorageValidity(t *testing.T) {
 }
 
 func ensureUserHasPodOfType(podType string) error {
-	u := NewUser(testUser, *k8sclient.NewK8sClient())
+	u := newUser(testUser)
 	userPodList, err := u.ListPods()
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list user pods %s", err.Error()))
@@ -267,7 +269,7 @@ func TestPodData(t *testing.T) {
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
-	u := NewUser(testUser, *k8sclient.NewK8sClient())
+	u := newUser(testUser)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatalf(err.Error())

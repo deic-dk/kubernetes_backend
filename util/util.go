@@ -1,16 +1,22 @@
 package util
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path"
 	"regexp"
 	"sync"
 	"time"
 
+	yaml "gopkg.in/yaml.v3"
+
 	apiv1 "k8s.io/api/core/v1"
 )
+
+const configFile = "config.yaml"
 
 // type for signalling whether one-off events have completed successfully within a timeout
 type ReadyChannel struct {
@@ -69,17 +75,6 @@ func (t *ReadyChannel) Receive() bool {
 	return value
 }
 
-// Do ch<-value if the channel is ready to receive a value,
-// otherwise do nothing
-// This allows the goroutine attempting a send to continue without blocking
-// To ensure ch can take a value, make it a buffered channel with enough space
-func TrySend(ch chan<- bool, value bool) {
-	select {
-	case ch <- value:
-	default:
-	}
-}
-
 // Block until an input was received from each channel in inputChannels,
 // then send output <- input0 && input 1 && input2...
 func CombineReadyChannels(inputChannels []*ReadyChannel, outputChannel *ReadyChannel) {
@@ -115,45 +110,6 @@ func GetRemoteIP(r *http.Request) string {
 	return regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(siloIP)
 }
 
-// read saved tokens or pod info from disk
-// TODO change to a nicer way of serializing this
-func ReadSavedMap(dirName string) (map[string]string, error) {
-	savedMap := make(map[string]string)
-	fileList, err := ioutil.ReadDir(dirName)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// if the directory doesn't exist, stop here
-			return savedMap, nil
-		} else {
-			// if there's some problem other than the directory not existing, log it
-			return savedMap, err
-		}
-	}
-	for _, file := range fileList {
-		fileName := file.Name()
-		content, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", dirName, fileName))
-		if err != nil {
-			return savedMap, err
-		}
-		savedMap[fileName] = string(content)
-	}
-	return savedMap, nil
-}
-
-// Returns whether a pod has a container listening on port 22
-func NeedsSshService(pod *apiv1.Pod) bool {
-	listensSsh := false
-	for _, container := range pod.Spec.Containers {
-		for _, port := range container.Ports {
-			if port.ContainerPort == 22 {
-				listensSsh = true
-				break
-			}
-		}
-	}
-	return listensSsh
-}
-
 func GetUserIDFromLabels(labels map[string]string) string {
 	user, hasUser := labels["user"]
 	if !hasUser {
@@ -169,4 +125,68 @@ func GetUserIDFromLabels(labels map[string]string) string {
 		}
 	}
 	return user
+}
+
+type OptionalRestartPolicy string
+
+const (
+	RestartPolicyAlways    OptionalRestartPolicy = OptionalRestartPolicy(apiv1.RestartPolicyAlways)
+	RestartPolicyOnFailure OptionalRestartPolicy = OptionalRestartPolicy(apiv1.RestartPolicyOnFailure)
+	RestartPolicyNever     OptionalRestartPolicy = OptionalRestartPolicy(apiv1.RestartPolicyNever)
+	RestartPolicyDefault   OptionalRestartPolicy = "Default"
+)
+
+type GlobalConfig struct {
+	RestartPolicy          apiv1.RestartPolicy
+	TimeoutCreate          time.Duration
+	TimeoutDelete          time.Duration
+	Namespace              string
+	TokenDir               string
+	PublicIP               string
+	WhitelistManifestRegex string
+	TokenByteLimit         int
+	NfsStorageRoot         string
+	MandatoryEnvVars       map[string]string
+}
+
+func getConfigFilename() string {
+	goPath := os.Getenv("GOPATH")
+	return path.Join(goPath, "src/user_pods_k8s_backend/config.yaml")
+}
+
+func SaveGlobalConfig(c GlobalConfig) error {
+	buffer := new(bytes.Buffer)
+	encoder := yaml.NewEncoder(buffer)
+	err := encoder.Encode(c)
+	if err != nil {
+		return err
+	}
+	err = ioutil.WriteFile(getConfigFilename(), buffer.Bytes(), 0600)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func MustLoadGlobalConfig() GlobalConfig {
+	var config GlobalConfig
+	// Open the config file
+	file, err := os.Open(getConfigFilename())
+	if err != nil {
+		panic(err.Error())
+	}
+	// Decode into the config struct
+	decoder := yaml.NewDecoder(file)
+	err = decoder.Decode(&config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// Check that WhitelistManifestRegex compiles to a regex
+	_, err = regexp.Compile(config.WhitelistManifestRegex)
+	if err != nil {
+		panic(fmt.Sprintf("Invalid WhitelistManifestRegex in config: %s", err.Error()))
+	}
+
+	return config
 }

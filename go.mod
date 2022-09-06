@@ -3,6 +3,7 @@ module github.com/deic.dk/user_pods_k8s_backend
 go 1.18
 
 require (
+	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.19.0
 	k8s.io/apimachinery v0.19.0
 	k8s.io/client-go v0.19.0

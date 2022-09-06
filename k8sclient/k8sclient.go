@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
@@ -21,15 +20,11 @@ import (
 type K8sClient struct {
 	config        *rest.Config
 	clientset     *kubernetes.Clientset
-	TimeoutDelete time.Duration
-	TimeoutCreate time.Duration
-	Namespace     string
-	TokenDir      string
-	PublicIP      string
+	globalConfig util.GlobalConfig
 }
 
 // initialize a new K8SClient
-func NewK8sClient() *K8sClient {
+func NewK8sClient(globalConfig util.GlobalConfig) K8sClient {
 	// Generate the API config from ENV and /var/run/secrets/kubernetes.io/serviceaccount inside a pod
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -40,16 +35,10 @@ func NewK8sClient() *K8sClient {
 	if err != nil {
 		panic(err.Error())
 	}
-	return &K8sClient{
+	return K8sClient{
 		config:    config,
 		clientset: clientset,
-		// TODO figure out how to get the namespace automatically from within the pod where this runs
-		Namespace:     "sciencedata-dev",
-		TimeoutDelete: 90 * time.Second,
-		TimeoutCreate: 90 * time.Second,
-		TokenDir:      "/tmp/tokens",
-		// TODO set this with an external config file instead of hardcoding
-		PublicIP: "130.226.137.130",
+		globalConfig: globalConfig,
 	}
 }
 
@@ -66,13 +55,13 @@ func (c *K8sClient) WatchFor(
 	// create a watcher for the API resource of the correct type
 	switch resourceType {
 	case "Pod":
-		watcher, err = c.clientset.CoreV1().Pods(c.Namespace).Watch(context.TODO(), listOptions)
+		watcher, err = c.clientset.CoreV1().Pods(c.globalConfig.Namespace).Watch(context.TODO(), listOptions)
 	case "PV":
 		watcher, err = c.clientset.CoreV1().PersistentVolumes().Watch(context.TODO(), listOptions)
 	case "PVC":
-		watcher, err = c.clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Watch(context.TODO(), listOptions)
+		watcher, err = c.clientset.CoreV1().PersistentVolumeClaims(c.globalConfig.Namespace).Watch(context.TODO(), listOptions)
 	case "SVC":
-		watcher, err = c.clientset.CoreV1().Services(c.Namespace).Watch(context.TODO(), listOptions)
+		watcher, err = c.clientset.CoreV1().Services(c.globalConfig.Namespace).Watch(context.TODO(), listOptions)
 	default:
 		err = errors.New("Unsupported resource type for watcher")
 	}
@@ -147,11 +136,11 @@ func signalPVCReady(watcher watch.Interface, ch *util.ReadyChannel) {
 }
 
 func (c *K8sClient) ListPods(opt metav1.ListOptions) (*apiv1.PodList, error) {
-	return c.clientset.CoreV1().Pods(c.Namespace).List(context.TODO(), opt)
+	return c.clientset.CoreV1().Pods(c.globalConfig.Namespace).List(context.TODO(), opt)
 }
 
 func (c *K8sClient) DeletePod(name string) error {
-	return c.clientset.CoreV1().Pods(c.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	return c.clientset.CoreV1().Pods(c.globalConfig.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
 func (c *K8sClient) WatchDeletePod(name string, finished *util.ReadyChannel) {
@@ -159,7 +148,7 @@ func (c *K8sClient) WatchDeletePod(name string, finished *util.ReadyChannel) {
 }
 
 func (c *K8sClient) CreatePod(target *apiv1.Pod) (*apiv1.Pod, error) {
-	return c.clientset.CoreV1().Pods(c.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
+	return c.clientset.CoreV1().Pods(c.globalConfig.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
 func (c *K8sClient) WatchCreatePod(name string, ready *util.ReadyChannel) {
@@ -167,11 +156,11 @@ func (c *K8sClient) WatchCreatePod(name string, ready *util.ReadyChannel) {
 }
 
 func (c *K8sClient) ListPVC(opt metav1.ListOptions) (*apiv1.PersistentVolumeClaimList, error) {
-	return c.clientset.CoreV1().PersistentVolumeClaims(c.Namespace).List(context.TODO(), opt)
+	return c.clientset.CoreV1().PersistentVolumeClaims(c.globalConfig.Namespace).List(context.TODO(), opt)
 }
 
 func (c *K8sClient) DeletePVC(name string) error {
-	return c.clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	return c.clientset.CoreV1().PersistentVolumeClaims(c.globalConfig.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
 func (c *K8sClient) WatchDeletePVC(name string, finished *util.ReadyChannel) {
@@ -179,7 +168,7 @@ func (c *K8sClient) WatchDeletePVC(name string, finished *util.ReadyChannel) {
 }
 
 func (c *K8sClient) CreatePVC(target *apiv1.PersistentVolumeClaim) (*apiv1.PersistentVolumeClaim, error) {
-	return c.clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
+	return c.clientset.CoreV1().PersistentVolumeClaims(c.globalConfig.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
 func (c *K8sClient) WatchCreatePVC(name string, ready *util.ReadyChannel) {
@@ -207,15 +196,15 @@ func (c *K8sClient) WatchCreatePV(name string, ready *util.ReadyChannel) {
 }
 
 func (c *K8sClient) ListServices(opt metav1.ListOptions) (*apiv1.ServiceList, error) {
-	return c.clientset.CoreV1().Services(c.Namespace).List(context.TODO(), opt)
+	return c.clientset.CoreV1().Services(c.globalConfig.Namespace).List(context.TODO(), opt)
 }
 
 func (c *K8sClient) CreateService(target *apiv1.Service) (*apiv1.Service, error) {
-	return c.clientset.CoreV1().Services(c.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
+	return c.clientset.CoreV1().Services(c.globalConfig.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
 }
 
 func (c *K8sClient) DeleteService(name string) error {
-	return c.clientset.CoreV1().Services(c.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	return c.clientset.CoreV1().Services(c.globalConfig.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
 func (c *K8sClient) WatchDeleteService(name string, finished *util.ReadyChannel) {
@@ -228,7 +217,7 @@ func (c *K8sClient) PodExec(command []string, pod *apiv1.Pod, nContainer int) (b
 	restRequest := c.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod.Name).
-		Namespace(c.Namespace).
+		Namespace(c.globalConfig.Namespace).
 		SubResource("exec").
 		VersionedParams(
 			&apiv1.PodExecOptions{

@@ -1,11 +1,11 @@
 package podcreator
 
 import (
-	"testing"
 	"fmt"
-	"regexp"
-	"time"
 	"os"
+	"regexp"
+	"testing"
+	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
@@ -15,15 +15,21 @@ import (
 )
 
 const (
-	testUser = "registeredtest7"
-	remoteIP = "10.0.0.20"
+	testUser   = "registeredtest7"
+	remoteIP   = "10.0.0.20"
 	homeServer = "10.2.0.20"
 	testSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n joshua@myhost"
 )
 
+func newUser(uid string) managed.User {
+	config := util.MustLoadGlobalConfig()
+	client := k8sclient.NewK8sClient(config)
+	return managed.NewUser(uid, client, config)
+}
+
 func TestPodCreator(t *testing.T) {
 	tests := []struct {
-		yamlURL string
+		yamlURL          string
 		containerEnvVars map[string]map[string]string
 	}{
 		{
@@ -35,9 +41,9 @@ func TestPodCreator(t *testing.T) {
 			map[string]map[string]string{"ubuntu-jammy": {"SSH_PUBLIC_KEY": testSshKey}},
 		},
 	}
-	u := managed.NewUser(testUser, *k8sclient.NewK8sClient())
+	u := newUser(testUser)
 	for _, test := range tests {
-		pc, err := NewPodCreator(test.yamlURL, u, remoteIP, test.containerEnvVars, u.Client)
+		pc, err := NewPodCreator(test.yamlURL, testUser, remoteIP, test.containerEnvVars, u.Client, u.GlobalConfig)
 		if err != nil {
 			t.Fatalf("Could't initialize podcreator for %s", err.Error())
 		}

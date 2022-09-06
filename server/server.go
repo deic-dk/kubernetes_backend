@@ -81,6 +81,7 @@ type watchMapEntry struct {
 
 type Server struct {
 	Client          k8sclient.K8sClient
+	GlobalConfig    util.GlobalConfig
 	CreatingPods    map[string]watchMapEntry
 	DeletingPods    map[string]watchMapEntry
 	DeletingStorage map[string]watchMapEntry
@@ -95,10 +96,11 @@ const (
 	DeletingStorage watchMapName = 2
 )
 
-func New(client k8sclient.K8sClient) *Server {
+func New(client k8sclient.K8sClient, globalConfig util.GlobalConfig) *Server {
 	var m sync.Mutex
 	return &Server{
 		Client:          client,
+		GlobalConfig:    globalConfig,
 		CreatingPods:    make(map[string]watchMapEntry),
 		DeletingPods:    make(map[string]watchMapEntry),
 		DeletingStorage: make(map[string]watchMapEntry),
@@ -141,7 +143,7 @@ func (s *Server) AddToWatchMaps(key string, entry watchMapEntry, mapName watchMa
 // If the username string is empty, use all pods in the namespace.
 func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
 	var response GetPodsResponse
-	user := managed.NewUser(request.UserID, s.Client)
+	user := managed.NewUser(request.UserID, s.Client, s.GlobalConfig)
 	podList, err := user.ListPods()
 	if err != nil {
 		return response, err
@@ -150,6 +152,7 @@ func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
 		podInfo := pod.GetPodInfo()
 		// If this podName is in the server's map of creating/deleting pods,
 		// then overwrite the podInfo.Status
+		s.mutex.Lock()
 		_, podCreating := s.CreatingPods[podInfo.PodName]
 		if podCreating {
 			podInfo.Status = "Creating"
@@ -159,6 +162,7 @@ func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
 				podInfo.Status = "Deleting"
 			}
 		}
+		s.mutex.Unlock()
 		response = append(response, podInfo)
 	}
 	return response, nil
@@ -196,10 +200,11 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 	// make podCreator
 	creator, err := podcreator.NewPodCreator(
 		request.YamlURL,
-		managed.NewUser(request.UserID, s.Client),
+		request.UserID,
 		request.RemoteIP,
 		request.ContainerEnvVars,
 		s.Client,
+		s.GlobalConfig,
 	)
 	if err != nil {
 		return response, err
@@ -210,10 +215,21 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 	if err != nil {
 		return response, err
 	}
+	// If creation was requested successfully, add the readyChannel to the server's watchMap
 	s.AddToWatchMaps(
 		pod.Object.Name,
 		watchMapEntry{readyChannel: finished, authCheck: request.UserID},
-		CreatingPods)
+		CreatingPods,
+	)
+
+	// If the readyChannel gets a `false`, then call for pod deletion
+	go func() {
+		if !finished.Receive() {
+			s.deletePodIfFailedCreate(pod.Object.Name, request)
+		}
+	}()
+
+	// Return the response
 	response.PodName = pod.Object.Name
 	return response, nil
 }
@@ -227,7 +243,7 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	request.RemoteIP = util.GetRemoteIP(r)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	finished := util.NewReadyChannel(s.Client.TimeoutCreate)
+	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutCreate)
 	response, err := s.createPod(request, finished)
 
 	var status int
@@ -255,7 +271,10 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) watchCreatePod(request WatchCreatePodRequest) (WatchCreatePodResponse, error) {
 	response := WatchCreatePodResponse{Ready: false}
+	// Thread-safe read in case a channel is added/removed concurrently
+	s.mutex.Lock()
 	entry, exists := s.CreatingPods[request.PodName]
+	s.mutex.Unlock()
 	if exists {
 		// Check that the userID matches the pod
 		if entry.authCheck != request.UserID {
@@ -269,7 +288,7 @@ func (s *Server) watchCreatePod(request WatchCreatePodRequest) (WatchCreatePodRe
 	}
 
 	// If there was no entry for this pod in `s.CreatingPods`, return true iff the pod exists and is owned by the user.
-	u := managed.NewUser(request.UserID, s.Client)
+	u := managed.NewUser(request.UserID, s.Client, s.GlobalConfig)
 	owned, err := u.OwnsPod(request.PodName)
 	if err != nil {
 		return response, err
@@ -302,6 +321,8 @@ func (s *Server) userHasRemainingPods(u managed.User) bool {
 		fmt.Printf("Error, couldn't list pods for user %s: %s\n", u.UserID, err.Error())
 		return false
 	}
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	// For each of the user's pods,
 	for _, pod := range podList {
 		// check whether it's being deleted.
@@ -314,16 +335,44 @@ func (s *Server) userHasRemainingPods(u managed.User) bool {
 	return false
 }
 
+func (s *Server) deletePodIfFailedCreate(podName string, createRequest CreatePodRequest) error {
+	// Construct a deletePodRequest
+	request := DeletePodRequest{
+		PodName:  podName,
+		UserID:   createRequest.UserID,
+		RemoteIP: createRequest.RemoteIP,
+	}
+	fmt.Printf("Attempting to delete pod %s because it didn't reach desired state", podName)
+
+	// Call for deletion
+	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
+	_, err := s.deletePod(request, finished)
+	if err != nil {
+		fmt.Printf("Error: Failed deleting pod %s after it failed creation: %s\n", podName, err.Error())
+		return err
+	}
+
+	// Wait and see whether it succeeded
+	if !finished.Receive() {
+		errorMessage := fmt.Sprintf("Error: Pod %s failed to reach deleted state. Deletion was triggered by failure to reach created state.\n", podName)
+		fmt.Print(errorMessage)
+		return errors.New(errorMessage)
+	}
+	return nil
+}
+
 func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel) (DeletePodResponse, error) {
 	response := DeletePodResponse{Requested: false}
+	s.mutex.Lock()
 	_, podIsBeingDeleted := s.DeletingPods[request.PodName]
+	s.mutex.Unlock()
 	if podIsBeingDeleted {
 		finished.Send(false)
 		return response, errors.New(fmt.Sprintf("pod %s is already being deleted", request.PodName))
 	}
 
 	// Try to initialize a podDeleter (this will check that the username matches)
-	deleter, err := poddeleter.NewPodDeleter(request.PodName, request.UserID, s.Client)
+	deleter, err := poddeleter.NewPodDeleter(request.PodName, request.UserID, s.Client, s.GlobalConfig)
 	if err != nil {
 		finished.Send(false)
 		return response, errors.New(fmt.Sprintf("Error starting pod deletion for %s: %s", request.PodName, err.Error()))
@@ -343,15 +392,23 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 	// Then if the user doesn't have remaining pods, call for deletion of their storage,
 	// If this fails, log the error, but don't tell the user, because at this point their pod will be deleted.
 	if !s.userHasRemainingPods(deleter.Pod.Owner) {
-		cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
-		err = deleter.Pod.Owner.DeleteUserStorage(cleanedStorage)
-		if err != nil {
-			fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
+		// Check whether the user's storage is already being deleted
+		s.mutex.Lock()
+		_, cleaningStorage := s.DeletingStorage[deleter.Pod.Owner.Name]
+		s.mutex.Unlock()
+		// If it's not already being deleted, then call for deletion
+		if !cleaningStorage {
+			cleanedStorage := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
+			err = deleter.Pod.Owner.DeleteUserStorage(cleanedStorage)
+			if err != nil {
+				fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
+			} else {
+				s.AddToWatchMaps(
+					deleter.Pod.Owner.Name,
+					watchMapEntry{readyChannel: cleanedStorage},
+					DeletingStorage)
+			}
 		}
-		s.AddToWatchMaps(
-			deleter.Pod.Owner.Name,
-			watchMapEntry{readyChannel: cleanedStorage},
-			DeletingStorage)
 	}
 
 	response.Requested = true
@@ -366,7 +423,7 @@ func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
 	request.RemoteIP = util.GetRemoteIP(r)
 	fmt.Printf("deletePod request: %+v\n", request)
 
-	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
+	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 	response, err := s.deletePod(request, finished)
 	var status int
 	if err != nil {
@@ -389,7 +446,10 @@ func (s *Server) watchDeletePod(request WatchDeletePodRequest) (WatchDeletePodRe
 	// Default true, so that if there is no entry in `s.DeletingPods`, there's no difference between
 	// the pod not existing and the pod existing with a different owner than `request.UserID`
 	response := WatchDeletePodResponse{Deleted: true}
+	// Thread-safe read in case a channel is added/removed concurrently
+	s.mutex.Lock()
 	entry, exists := s.DeletingPods[request.PodName]
+	s.mutex.Unlock()
 	if exists {
 		if entry.authCheck != request.UserID {
 			return response, errors.New(
@@ -400,7 +460,7 @@ func (s *Server) watchDeletePod(request WatchDeletePodRequest) (WatchDeletePodRe
 		return response, nil
 	}
 
-	u := managed.NewUser(request.UserID, s.Client)
+	u := managed.NewUser(request.UserID, s.Client, s.GlobalConfig)
 	owned, err := u.OwnsPod(request.PodName)
 	if err != nil {
 		return response, err
@@ -427,7 +487,7 @@ func (s *Server) ServeWatchDeletePod(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) error {
-	user := managed.NewUser(userID, s.Client)
+	user := managed.NewUser(userID, s.Client, s.GlobalConfig)
 	// Get a list of managed.Pod objects for all of the user's pods
 	podList, err := user.ListPods()
 	if err != nil {
@@ -438,14 +498,16 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 	// For each pod,
 	for _, pod := range podList {
 		// Check that it isn't already being deleted
+		s.mutex.Lock()
 		_, deleting := s.DeletingPods[pod.Object.Name]
+		s.mutex.Unlock()
 		if deleting {
 			continue
 		}
 
 		// Then initialize a deleter and call for the pod's deletion
 		deleter := poddeleter.NewFromPod(pod)
-		ch := util.NewReadyChannel(s.Client.TimeoutDelete)
+		ch := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 		err := deleter.DeletePod(ch)
 		// If something went wrong, log it
 		if err != nil {
@@ -461,7 +523,7 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 	}
 
 	// Finally, remove the user's storage PV and PVC
-	cleanedStorage := util.NewReadyChannel(s.Client.TimeoutDelete)
+	cleanedStorage := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 	err = user.DeleteUserStorage(cleanedStorage)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't call for deletion of user storage for %s: %s", userID, err.Error()))
@@ -483,7 +545,7 @@ func (s *Server) ServeDeleteAllUserPods(w http.ResponseWriter, r *http.Request) 
 	request.RemoteIP = util.GetRemoteIP(r)
 	fmt.Printf("deleteAllUserPods request: %+v\n", request)
 
-	finished := util.NewReadyChannel(s.Client.TimeoutDelete)
+	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 	err := s.deleteAllUserPods(request.UserID, finished)
 	var status int
 	var response DeleteAllPodsResponse
@@ -527,7 +589,7 @@ func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
 		}
 		// If the pod that the service was created for no longer exists, then delete the service
 		if len(podList.Items) == 0 {
-			ch := util.NewReadyChannel(s.Client.TimeoutDelete)
+			ch := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 			taskChannelList = append(taskChannelList, ch)
 			// Make a watcher that will announce its deletion
 			go func() {
@@ -552,14 +614,14 @@ func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
 	for _, pvc := range pvcList.Items {
 		// If the pvc is for user storage
 		if strings.Contains(pvc.Name, "user-storage") {
-			u := managed.NewUser(util.GetUserIDFromLabels(pvc.Labels), s.Client)
+			u := managed.NewUser(util.GetUserIDFromLabels(pvc.Labels), s.Client, s.GlobalConfig)
 			userPodList, err := u.ListPods()
 			if err != nil {
 				return err
 			}
 			// If the user who owns this PVC doesn't have any pods, then delete the storage
 			if len(userPodList) == 0 {
-				ch := util.NewReadyChannel(s.Client.TimeoutDelete)
+				ch := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 				err := u.DeleteUserStorage(ch)
 				if err != nil {
 					return err
@@ -571,7 +633,7 @@ func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
 
 	// Clean up pod caches
 	// Get a list of every filename in tokenDir
-	dir, err := os.Open(s.Client.TokenDir)
+	dir, err := os.Open(s.GlobalConfig.TokenDir)
 	if err != nil {
 		return err
 	}
@@ -589,7 +651,7 @@ func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
 		}
 		// If there is no pod whose name matches this file, then it is an orphaned podcache
 		if len(podList.Items) == 0 {
-			err := os.Remove(fmt.Sprintf("%s/%s", s.Client.TokenDir, fileName))
+			err := os.Remove(fmt.Sprintf("%s/%s", s.GlobalConfig.TokenDir, fileName))
 			if err != nil {
 				return errors.New(fmt.Sprintf("Couldn't delete orphaned podcache %s: %s", fileName, err.Error()))
 			}
@@ -605,7 +667,7 @@ func (s *Server) ServeCleanAllUnused(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Clean all request from IP %s", remoteIP)
 	// Could limit this to a whitelisted IP range
 
-	finished := util.NewReadyChannel(3 * s.Client.TimeoutDelete)
+	finished := util.NewReadyChannel(3 * s.GlobalConfig.TimeoutDelete)
 	err := s.cleanAllUnused(finished)
 	status := http.StatusOK
 	if err != nil {
