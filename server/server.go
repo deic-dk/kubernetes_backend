@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -110,7 +111,7 @@ func New(client k8sclient.K8sClient, globalConfig util.GlobalConfig) *Server {
 
 // Add an entry to the specified watchMap (e.g. `s.CreatingPods`) for the given key.
 // As soon as a value is ready in `entry.readyChannel`, the entry will be removed from the map.
-func (s *Server) AddToWatchMaps(key string, entry watchMapEntry, mapName watchMapName) {
+func (s *Server) addToWatchMaps(key string, entry watchMapEntry, mapName watchMapName) {
 	// Thread-safe add `key` to the map of events to wait for
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -137,6 +138,51 @@ func (s *Server) AddToWatchMaps(key string, entry watchMapEntry, mapName watchMa
 			delete(s.DeletingStorage, key)
 		}
 	}()
+}
+
+// Gets the IP of the source that made the request, either r.RemoteAddr,
+// or if it was forwarded, the first address in the X-Forwarded-For header
+func (s *Server) getRemoteIP(r *http.Request) string {
+	// When running this behind a manual reverse proxy, r.RemoteAddr is just the proxy's IP addr,
+	// and X-Forward-For header should contain the silo's IP address.
+	// This may be different with ingress.
+	var remoteAddr string
+	value, forwarded := r.Header["X-Forwarded-For"]
+	if forwarded {
+		remoteAddr = value[0]
+	} else {
+		remoteAddr = r.RemoteAddr
+	}
+
+	// Regex to get the IP address without port out of `r.RemoteAddr`
+	// First check whether it's a valid v4 address
+	v4regex := regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`)
+	remoteIP := v4regex.FindString(remoteAddr)
+	v4 := true
+	if len(remoteIP) == 0 {
+		v6regex := regexp.MustCompile(`([a-fA-F0-9]{1,4}:|:)+:[a-fA-F0-9]{1,4}`)
+		remoteIP = v6regex.FindString(remoteAddr)
+		v4 = false
+		// If it's still empty, then return
+		if len(remoteIP) == 0 {
+			return remoteIP
+		}
+	}
+	// Check whether the address is loopback.
+	// If the request is from loopback, it is a test
+	// and needs to be rewritten as though it came from a host where nfs shares are available
+	if v4 {
+		if strings.Contains(remoteIP, "127.0.0.1") {
+			return s.GlobalConfig.TestingHost
+		}
+	} else {
+		if strings.Contains(remoteIP, "::1") {
+			return s.GlobalConfig.TestingHost
+		}
+	}
+
+	// If it wasn't a loopback address, return the actual remoteIP
+	return remoteIP
 }
 
 // Fills in a getPodsResponse with information about all the pods owned by the user.
@@ -174,7 +220,7 @@ func (s *Server) ServeGetPods(w http.ResponseWriter, r *http.Request) {
 	var request GetPodsRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
-	request.RemoteIP = util.GetRemoteIP(r)
+	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("getPods request: %+v\n", request)
 
 	// get the list of pods
@@ -216,7 +262,7 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 		return response, err
 	}
 	// If creation was requested successfully, add the readyChannel to the server's watchMap
-	s.AddToWatchMaps(
+	s.addToWatchMaps(
 		pod.Object.Name,
 		watchMapEntry{readyChannel: finished, authCheck: request.UserID},
 		CreatingPods,
@@ -240,7 +286,7 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	var request CreatePodRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
-	request.RemoteIP = util.GetRemoteIP(r)
+	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("createPod request: %+v\n", request)
 
 	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutCreate)
@@ -384,7 +430,7 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 		return response, err
 	}
 	// If that was successful, the server should keep track that this pod is deleting
-	s.AddToWatchMaps(
+	s.addToWatchMaps(
 		request.PodName,
 		watchMapEntry{readyChannel: finished, authCheck: request.UserID},
 		DeletingPods)
@@ -403,7 +449,7 @@ func (s *Server) deletePod(request DeletePodRequest, finished *util.ReadyChannel
 			if err != nil {
 				fmt.Printf("Error: Couldn't call for deletion of user storage for %s: %s\n", deleter.Pod.Owner.UserID, err.Error())
 			} else {
-				s.AddToWatchMaps(
+				s.addToWatchMaps(
 					deleter.Pod.Owner.Name,
 					watchMapEntry{readyChannel: cleanedStorage},
 					DeletingStorage)
@@ -420,7 +466,7 @@ func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
 	var request DeletePodRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
-	request.RemoteIP = util.GetRemoteIP(r)
+	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("deletePod request: %+v\n", request)
 
 	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
@@ -516,7 +562,7 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 		}
 		chanList = append(chanList, ch)
 		// If the delete call was made successfully, then add the pod to `s.DeletingPods`,
-		s.AddToWatchMaps(
+		s.addToWatchMaps(
 			pod.Object.Name,
 			watchMapEntry{readyChannel: ch, authCheck: userID},
 			DeletingPods)
@@ -528,7 +574,7 @@ func (s *Server) deleteAllUserPods(userID string, finished *util.ReadyChannel) e
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't call for deletion of user storage for %s: %s", userID, err.Error()))
 	}
-	s.AddToWatchMaps(
+	s.addToWatchMaps(
 		user.Name,
 		watchMapEntry{readyChannel: cleanedStorage},
 		DeletingStorage)
@@ -542,7 +588,7 @@ func (s *Server) ServeDeleteAllUserPods(w http.ResponseWriter, r *http.Request) 
 	var request DeleteAllPodsRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(&request)
-	request.RemoteIP = util.GetRemoteIP(r)
+	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("deleteAllUserPods request: %+v\n", request)
 
 	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
@@ -663,7 +709,7 @@ func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
 }
 
 func (s *Server) ServeCleanAllUnused(w http.ResponseWriter, r *http.Request) {
-	remoteIP := util.GetRemoteIP(r)
+	remoteIP := s.getRemoteIP(r)
 	fmt.Printf("Clean all request from IP %s", remoteIP)
 	// Could limit this to a whitelisted IP range
 

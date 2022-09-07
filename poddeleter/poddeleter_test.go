@@ -10,6 +10,7 @@ import (
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
+	"github.com/deic.dk/user_pods_k8s_backend/testingutil"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -22,6 +23,34 @@ func newUser(uid string) managed.User {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
 	return managed.NewUser(uid, client, config)
+}
+
+func createPodOfType(podType string, finished *util.ReadyChannel) (string, error) {
+	var yamlURL string
+	var userID string
+	var containerEnvVars map[string]map[string]string
+	switch podType {
+	case "jupyter":
+		yamlURL = "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml"
+		userID = testUser
+		containerEnvVars = map[string]map[string]string{
+			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
+		}
+	case "ubuntu":
+		yamlURL = "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml"
+		userID = testUser
+		containerEnvVars = map[string]map[string]string{
+			"ubuntu-jammy": {"SSH_PUBLIC_KEY": testingutil.TestSshKey},
+		}
+	default:
+		return "", errors.New("Unknown pod type")
+	}
+	podName, err := testingutil.CreatePod(userID, yamlURL, containerEnvVars)
+	if err != nil {
+		return "", err
+	}
+	go testingutil.WatchCreatePod(userID, podName, finished)
+	return "", nil
 }
 
 func ensureUserHasPodOfType(podType string) error {
@@ -38,7 +67,14 @@ func ensureUserHasPodOfType(podType string) error {
 		}
 	}
 	if !hasPod {
-		return errors.New(fmt.Sprintf("User doesn't have an existing pod of type %s", podType))
+		finished := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
+		podName, err := createPodOfType(podType, finished)
+		if err != nil {
+			return err
+		}
+		if !finished.Receive() {
+			return errors.New(fmt.Sprintf("Failed to create pod %s", podName))
+		}
 	}
 	return nil
 }

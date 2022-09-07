@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"net/http"
+	"net"
 	"os"
 	"path"
 	"regexp"
@@ -94,22 +94,6 @@ func ReceiveReadyChannels(inputChannels []*ReadyChannel) bool {
 	return output
 }
 
-// Gets the IP of the source that made the request, either r.RemoteAddr,
-// or if it was forwarded, the first address in the X-Forwarded-For header
-func GetRemoteIP(r *http.Request) string {
-	// When running this behind caddy, r.RemoteAddr is just the caddy process's IP addr,
-	// and X-Forward-For header should contain the silo's IP address.
-	// This may be different with ingress.
-	var siloIP string
-	value, forwarded := r.Header["X-Forwarded-For"]
-	if forwarded {
-		siloIP = value[0]
-	} else {
-		siloIP = r.RemoteAddr
-	}
-	return regexp.MustCompile(`(\d{1,3}[.]){3}\d{1,3}`).FindString(siloIP)
-}
-
 func GetUserIDFromLabels(labels map[string]string) string {
 	user, hasUser := labels["user"]
 	if !hasUser {
@@ -127,15 +111,6 @@ func GetUserIDFromLabels(labels map[string]string) string {
 	return user
 }
 
-type OptionalRestartPolicy string
-
-const (
-	RestartPolicyAlways    OptionalRestartPolicy = OptionalRestartPolicy(apiv1.RestartPolicyAlways)
-	RestartPolicyOnFailure OptionalRestartPolicy = OptionalRestartPolicy(apiv1.RestartPolicyOnFailure)
-	RestartPolicyNever     OptionalRestartPolicy = OptionalRestartPolicy(apiv1.RestartPolicyNever)
-	RestartPolicyDefault   OptionalRestartPolicy = "Default"
-)
-
 type GlobalConfig struct {
 	RestartPolicy          apiv1.RestartPolicy
 	TimeoutCreate          time.Duration
@@ -147,6 +122,7 @@ type GlobalConfig struct {
 	TokenByteLimit         int
 	NfsStorageRoot         string
 	MandatoryEnvVars       map[string]string
+	TestingHost            string
 }
 
 func getConfigFilename() string {
@@ -198,10 +174,12 @@ func MustLoadGlobalConfig() GlobalConfig {
 		panic(fmt.Sprintf("Invalid restart policy. Must be \"Always\", \"OnFailure\", \"Never\", or empty"))
 	}
 
-	// Check that PublicIP is an IP address (currently only v4)
-	ipRegex := regexp.MustCompile(`^(\d{1,3}[.]){3}\d{1,3}$`)
-	if !ipRegex.MatchString(config.PublicIP) {
+	// Check that PublicIP and TestingHost are IP addresses
+	if addr := net.ParseIP(config.PublicIP); addr == nil {
 		panic(fmt.Sprintf("Public IP %s not a valid ip address", config.PublicIP))
+	}
+	if addr := net.ParseIP(config.TestingHost); addr == nil {
+		panic(fmt.Sprintf("TestingHost %s not a valid ip address", config.TestingHost))
 	}
 
 	return config
