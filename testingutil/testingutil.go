@@ -34,6 +34,14 @@ type watchCreatePodResponse struct {
 	Ready bool `json:"ready"`
 }
 
+type deleteAllUserPodsRequest struct {
+	UserID string `json:"user_id"`
+}
+
+type deleteAllUserPodsResponse struct {
+	Deleted bool `json:"deleted"`
+}
+
 func CreatePod(request CreatePodRequest) (string, error) {
 	// Construct the request
 	requestBody, err := json.Marshal(&request)
@@ -91,6 +99,37 @@ func WatchCreatePod(userID string, podName string, finished *util.ReadyChannel) 
 		return err
 	}
 	finished.Send(unmarshalled.Ready)
+
+	return nil
+}
+
+func DeleteAllUserPods(userID string) error {
+	// Construct the request
+	requestBody, err := json.Marshal(&deleteAllUserPodsRequest{UserID: userID})
+	if err != nil {
+		return err
+	}
+
+	// Send the request
+	response, err := http.Post("http://localhost/delete_all_user", "application/json", bytes.NewReader(requestBody))
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	// Decode the body
+	responseBody, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+	var unmarshalled deleteAllUserPodsResponse
+	err = json.Unmarshal(responseBody, &unmarshalled)
+	if err != nil {
+		return err
+	}
+
+	if !unmarshalled.Deleted {
+		return errors.New("deleteAllUserPods didn't complete successfully")
+	}
 
 	return nil
 }

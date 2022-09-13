@@ -72,7 +72,7 @@ type DeleteAllPodsRequest struct {
 }
 
 type DeleteAllPodsResponse struct {
-	Requested bool `json:"requested"`
+	Deleted bool `json:"deleted"`
 }
 
 type watchMapEntry struct {
@@ -591,17 +591,24 @@ func (s *Server) ServeDeleteAllUserPods(w http.ResponseWriter, r *http.Request) 
 	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("deleteAllUserPods request: %+v\n", request)
 
-	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
+	// give a long enough timout that it will accommodate slowly deleting PV/PVC in worst case
+	finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
 	err := s.deleteAllUserPods(request.UserID, finished)
 	var status int
 	var response DeleteAllPodsResponse
 	if err != nil {
 		status = http.StatusBadRequest
-		response.Requested = false
+		response.Deleted = false
 		fmt.Printf("Error: %s\n", err.Error())
-	} else {
-		status = http.StatusOK
-		response.Requested = true
+	} else { // if the request was made without error
+		// wait for the result, and if it succeeds, set an okay response
+		if finished.Receive() {
+			status = http.StatusOK
+			response.Deleted = true
+		} else { // if it was requested successfully but failed to delete everything,
+			status = http.StatusOK
+			response.Deleted = false
+		}
 	}
 
 	// write the response

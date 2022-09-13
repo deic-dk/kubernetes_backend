@@ -583,14 +583,14 @@ func (p *Pod) getAllTokens(reload bool) map[string]string {
 		var token string
 		if reload {
 			// if reloading tokens of pods that should already have created /tmp/key
-			token, err = p.getToken(key)
+			token, err = p.GetToken(key)
 			if err != nil {
 				fmt.Printf("Error while refreshing token %s for pod %s: %s\n", key, p.Object.Name, err.Error())
 			}
 		} else {
 			// give a new pod up to 10s to create /tmp/key before giving up
 			for i := 0; i < 10; i++ {
-				token, err = p.getToken(key)
+				token, err = p.GetToken(key)
 				if err != nil {
 					time.Sleep(1 * time.Second)
 				} else {
@@ -610,7 +610,7 @@ func (p *Pod) getAllTokens(reload bool) map[string]string {
 }
 
 // Try to copy /tmp/"key" in the created pod into /tmp into p.cache.tokens
-func (p *Pod) getToken(key string) (string, error) {
+func (p *Pod) GetToken(key string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	var err error
 	stdout, stderr, err = p.Client.PodExec([]string{"cat", fmt.Sprintf("/tmp/%s", key)}, p.Object, 0)
