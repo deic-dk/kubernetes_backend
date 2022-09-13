@@ -15,88 +15,126 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	testUser = "registeredtest7"
-)
-
 func newUser(uid string) managed.User {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
 	return managed.NewUser(uid, client, config)
 }
 
-func createPodOfType(podType string, finished *util.ReadyChannel) (string, error) {
-	var yamlURL string
-	var userID string
-	var containerEnvVars map[string]map[string]string
-	switch podType {
-	case "jupyter":
-		yamlURL = "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml"
-		userID = testUser
-		containerEnvVars = map[string]map[string]string{
-			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
-		}
-	case "ubuntu":
-		yamlURL = "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml"
-		userID = testUser
-		containerEnvVars = map[string]map[string]string{
-			"ubuntu-jammy": {"SSH_PUBLIC_KEY": testingutil.TestSshKey},
-		}
-	default:
-		return "", errors.New("Unknown pod type")
-	}
-	podName, err := testingutil.CreatePod(userID, yamlURL, containerEnvVars)
-	if err != nil {
-		return "", err
-	}
-	go testingutil.WatchCreatePod(userID, podName, finished)
-	return "", nil
-}
-
-func ensureUserHasPodOfType(podType string) error {
-	u := newUser(testUser)
+func ensureUserHasEach(requests map[string]testingutil.CreatePodRequest) error {
+	u := newUser(testingutil.TestUser)
 	userPodList, err := u.ListPods()
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list user pods %s", err.Error()))
 	}
-	hasPod := false
-	for _, pod := range userPodList {
-		if strings.Contains(pod.Object.Name, podType) {
-			hasPod = true
-			break
+	var chanList []*util.ReadyChannel
+	// For each of the standard pod types,
+	for podType, request := range requests {
+		hasPod := false
+		// Look through the test user's PodList to see if one exists already
+		for _, pod := range userPodList {
+			if strings.Contains(pod.Object.Name, podType) {
+				hasPod = true
+				break
+			}
+		}
+		// If they don't already have one, then create it
+		if !hasPod {
+			podName, err := testingutil.CreatePod(request)
+			if err != nil {
+				return err
+			}
+			finished := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
+			go testingutil.WatchCreatePod(u.UserID, podName, finished)
+			chanList = append(chanList, finished)
 		}
 	}
-	if !hasPod {
-		finished := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
-		podName, err := createPodOfType(podType, finished)
-		if err != nil {
-			return err
-		}
-		if !finished.Receive() {
-			return errors.New(fmt.Sprintf("Failed to create pod %s", podName))
-		}
+	if !util.ReceiveReadyChannels(chanList) {
+		return errors.New("Not all pods created for testing reached ready state")
 	}
 	return nil
 }
 
-func TestDeletePod(t *testing.T) {
-	// Make sure the user has one of each pod type to attempt to delete
-	desiredPodTypes := []string{"ubuntu", "jupyter"}
-	for _, podType := range desiredPodTypes {
-		err := ensureUserHasPodOfType(podType)
-		if err != nil {
-			t.Fatal(err.Error())
-		}
+func TestFailDeletePods(t *testing.T) {
+	// Make sure the user has one of each of the standard pod types to attempt to delete
+	podRequests := testingutil.GetStandardPodRequests()
+	err := ensureUserHasEach(podRequests)
+	if err != nil {
+		t.Fatalf("Couldn't ensure user had all pods: %s", err.Error())
 	}
 
-	// Then delete all of the users pods, and for each of them, check that poddeleter works correctly
-	u := newUser(testUser)
+	// Then attempt to delete one with an incorrect userID
+	u := newUser(testingutil.TestUser)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatal(err.Error())
 	}
-	for _, pod := range podList {
-		pd, err := NewPodDeleter(pod.Object.Name, testUser, u.Client, u.GlobalConfig)
+	var podToDelete managed.Pod
+	// Range over podRequests just to take the first key
+	for podType, _ := range podRequests {
+		found := false
+		for _, pod := range podList {
+			if strings.Contains(pod.Object.Name, podType) {
+				found = true
+				podToDelete = pod
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Couldn't find pod of type %s after it should have been created", podType)
+		}
+		break
+	}
+	t.Logf("Making incorret attempts to delete pod %s", podToDelete.Object.Name)
+
+	tryUserIDs := []string{"fail@user", "", "fail", "fail@user.id"}
+	for _, tryUserID := range tryUserIDs {
+		failPodDeleter, err := NewPodDeleter(podToDelete.Object.Name, tryUserID, u.Client, u.GlobalConfig)
+		if err == nil {
+			t.Fatalf("Initialized podDeleter without failure when using incorrect userID")
+		}
+		finished := util.NewReadyChannel(u.GlobalConfig.TimeoutDelete)
+		err = failPodDeleter.DeletePod(finished)
+		if err == nil {
+			t.Fatalf("podDeleter that wasn't initialized correctly didn't return error when calling DeletePod")
+		}
+	}
+}
+
+func TestDeletePod(t *testing.T) {
+	// Make sure the user has one of each of the standard pod types to attempt to delete
+	podRequests := testingutil.GetStandardPodRequests()
+	err := ensureUserHasEach(podRequests)
+	if err != nil {
+		t.Fatalf("Couldn't ensure user had all pods: %s", err.Error())
+	}
+
+	// Then delete one of each of the user's pods for each of the standard pod types,
+	// first create the slice of podsToDelete by finding one of each type in the
+	// user's podList
+	u := newUser(testingutil.TestUser)
+	podList, err := u.ListPods()
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	var podsToDelete []managed.Pod
+	for podType, _ := range podRequests {
+		found := false
+		for _, pod := range podList {
+			if strings.Contains(pod.Object.Name, podType) {
+				found = true
+				podsToDelete = append(podsToDelete, pod)
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Error, user should have a pod of type %s but doesn't", podType)
+		}
+	}
+
+	// Then delete them all
+	for _, pod := range podsToDelete {
+		pd, err := NewPodDeleter(pod.Object.Name, testingutil.TestUser, u.Client, u.GlobalConfig)
 		if err != nil {
 			t.Fatalf("Couldn't initialize pod deleter %s", err.Error())
 		}

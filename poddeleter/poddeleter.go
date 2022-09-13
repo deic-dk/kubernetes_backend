@@ -16,10 +16,11 @@ type PodDeleter struct {
 	userID       string
 	client       k8sclient.K8sClient
 	globalConfig util.GlobalConfig
+	initialized  bool
 }
 
 func NewPodDeleter(podName string, userID string, client k8sclient.K8sClient, globalConfig util.GlobalConfig) (PodDeleter, error) {
-	deleter := PodDeleter{podName: podName, userID: userID, client: client, globalConfig: globalConfig}
+	deleter := PodDeleter{podName: podName, userID: userID, client: client, globalConfig: globalConfig, initialized: false}
 	err := deleter.initPodObject()
 	if err != nil {
 		return deleter, err
@@ -28,7 +29,7 @@ func NewPodDeleter(podName string, userID string, client k8sclient.K8sClient, gl
 }
 
 func NewFromPod(pod managed.Pod) PodDeleter {
-	return PodDeleter{podName: pod.Object.Name, userID: pod.Owner.UserID, client: pod.Client, Pod: pod, globalConfig: pod.GlobalConfig}
+	return PodDeleter{podName: pod.Object.Name, userID: pod.Owner.UserID, client: pod.Client, Pod: pod, globalConfig: pod.GlobalConfig, initialized: true}
 }
 
 func (pd *PodDeleter) initPodObject() error {
@@ -47,10 +48,14 @@ func (pd *PodDeleter) initPodObject() error {
 		return errors.New(fmt.Sprintf("Pod %s not owned by user %s", pd.podName, pd.userID))
 	}
 	pd.Pod = pod
+	pd.initialized = true
 	return nil
 }
 
 func (pd *PodDeleter) DeletePod(finished *util.ReadyChannel) error {
+	if !pd.initialized {
+		return errors.New("PodDeleter can't DeletePod, not initialized with a pod object")
+	}
 	podDeleted := util.NewReadyChannel(pd.globalConfig.TimeoutDelete)
 	go func() {
 		pd.client.WatchDeletePod(pd.podName, podDeleted)

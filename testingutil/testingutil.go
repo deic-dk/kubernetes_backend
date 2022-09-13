@@ -15,13 +15,13 @@ const (
 	TestUser   = "registeredtest7"
 )
 
-type createPodRequest struct {
+type CreatePodRequest struct {
 	UserID   string                       `json:"user_id"`
 	YamlURL  string                       `json:"yaml_url"`
 	Settings map[string]map[string]string `json:"settings"`
 }
 
-type createPodResponse struct {
+type CreatePodResponse struct {
 	PodName string `json:"pod_name"`
 }
 
@@ -34,13 +34,9 @@ type watchCreatePodResponse struct {
 	Ready bool `json:"ready"`
 }
 
-func CreatePod(userID string, yamlURL string, settings map[string]map[string]string) (string, error) {
+func CreatePod(request CreatePodRequest) (string, error) {
 	// Construct the request
-	requestBody, err := json.Marshal(&createPodRequest{
-		UserID:   userID,
-		YamlURL:  yamlURL,
-		Settings: settings,
-	})
+	requestBody, err := json.Marshal(&request)
 	if err != nil {
 		return "", err
 	}
@@ -56,7 +52,7 @@ func CreatePod(userID string, yamlURL string, settings map[string]map[string]str
 	if err != nil {
 		return "", err
 	}
-	var unmarshalled createPodResponse
+	var unmarshalled CreatePodResponse
 	err = json.Unmarshal(responseBody, &unmarshalled)
 	if err != nil {
 		return "", err
@@ -97,4 +93,24 @@ func WatchCreatePod(userID string, podName string, finished *util.ReadyChannel) 
 	finished.Send(unmarshalled.Ready)
 
 	return nil
+}
+
+// Get a map of all standard pod types to their CreatePodRequests with default params
+func GetStandardPodRequests() map[string]CreatePodRequest {
+	response := make(map[string]CreatePodRequest)
+	response["jupyter"] = CreatePodRequest{
+		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
+		UserID:  TestUser,
+		Settings: map[string]map[string]string{
+			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
+		},
+	}
+	response["ubuntu"] = CreatePodRequest{
+		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml",
+		UserID:  TestUser,
+		Settings: map[string]map[string]string{
+			"ubuntu-jammy": {"SSH_PUBLIC_KEY": TestSshKey},
+		},
+	}
+	return response
 }
