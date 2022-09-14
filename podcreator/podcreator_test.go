@@ -17,11 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-const (
-	remoteIP   = "10.0.0.20"
-	homeServer = "10.2.0.20"
-)
-
 func newUser(uid string) managed.User {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
@@ -51,11 +46,11 @@ func TestPodCreation(t *testing.T) {
 	// Then attempt to create two of each of the standard pod types with default parameters
 	defaultRequests := testingutil.GetStandardPodRequests()
 	u := newUser(testingutil.TestUser)
-	mandatoryEnvVars := map[string]string{"HOME_SERVER": homeServer, "SD_UID": u.UserID}
+	mandatoryEnvVars := map[string]string{"HOME_SERVER": testingutil.HomeServer, "SD_UID": u.UserID}
 	for podType, request := range defaultRequests {
 		for i := 0; i < 2; i++ {
 			t.Logf("Creating %s pod", podType)
-			pc, err := NewPodCreator(request.YamlURL, u.UserID, remoteIP, request.Settings, u.Client, u.GlobalConfig)
+			pc, err := NewPodCreator(request.YamlURL, u.UserID, testingutil.RemoteIP, request.Settings, u.Client, u.GlobalConfig)
 			if err != nil {
 				t.Fatalf("Could't initialize podcreator for %s", err.Error())
 			}
@@ -164,7 +159,7 @@ func TestPodCreation(t *testing.T) {
 func TestPostCreationState(t *testing.T) {
 	u := newUser(testingutil.TestUser)
 	defaultRequests := testingutil.GetStandardPodRequests()
-	mandatoryEnvVars := map[string]string{"HOME_SERVER": homeServer, "SD_UID": u.UserID}
+	mandatoryEnvVars := map[string]string{"HOME_SERVER": testingutil.HomeServer, "SD_UID": u.UserID}
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatal(err.Error())

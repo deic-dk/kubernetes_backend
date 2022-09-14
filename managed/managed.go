@@ -345,7 +345,7 @@ func (p *Pod) GetPodInfo() PodInfo {
 	return podInfo
 }
 
-func (p *Pod) needsSshService() bool {
+func (p *Pod) NeedsSshService() bool {
 	listensSsh := false
 	for _, container := range p.Object.Spec.Containers {
 		for _, port := range container.Ports {
@@ -395,7 +395,7 @@ func (p *Pod) getSshPort() (string, error) {
 // fill p.cache.OtherResourceInfo with information about other k8s resources relevant to the pod
 func (p *Pod) getOtherResourceInfo() map[string]string {
 	otherResourceInfo := make(map[string]string)
-	if p.needsSshService() {
+	if p.NeedsSshService() {
 		sshPort, err := p.getSshPort()
 		if err != nil {
 			fmt.Printf("Error while copying ssh port for pod %s: %s\n", p.Object.Name, err.Error())
@@ -544,7 +544,7 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 
 	// Perform start jobs here
 
-	if p.needsSshService() {
+	if p.NeedsSshService() {
 		p.startSshService()
 	}
 	tokens := p.getAllTokens(false)

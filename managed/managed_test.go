@@ -298,7 +298,7 @@ func TestPodData(t *testing.T) {
 			}
 		}
 		sshPort, exists := info.OtherResourceInfo["sshPort"]
-		if exists && !pod.needsSshService() {
+		if exists && !pod.NeedsSshService() {
 			t.Fatalf("PodInfo has a listed Ssh port, but pod %s doesn't listen for ssh", object.Name)
 		}
 		if exists {
@@ -311,10 +311,10 @@ func TestPodData(t *testing.T) {
 			}
 		}
 
-		// check that needsSshService is correct
+		// check that NeedsSshService is correct
 		for _, podType := range podsThatNeedSsh {
 			if strings.Contains(pod.Object.Name, podType) {
-				if !pod.needsSshService() {
+				if !pod.NeedsSshService() {
 					t.Fatalf("pod %s needs ssh service but needsSshService returned false", pod.Object.Name)
 				}
 				svcList, err := pod.ListServices()
@@ -335,7 +335,7 @@ func TestPodData(t *testing.T) {
 		}
 		for _, podType := range podsThatDontNeedSsh {
 			if strings.Contains(pod.Object.Name, podType) {
-				if pod.needsSshService() {
+				if pod.NeedsSshService() {
 					t.Fatalf("pod %s doesn't need ssh service but needsSshService returned true", pod.Object.Name)
 				}
 			}

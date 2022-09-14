@@ -13,6 +13,8 @@ import (
 const (
 	TestSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n joshua@myhost"
 	TestUser   = "registeredtest7"
+	RemoteIP   = "10.0.0.20"
+	HomeServer = "10.2.0.20"
 )
 
 type CreatePodRequest struct {
