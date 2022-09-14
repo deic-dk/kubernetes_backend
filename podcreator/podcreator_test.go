@@ -1,9 +1,10 @@
 package podcreator
 
 import (
+	"bytes"
 	"fmt"
-	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,8 +28,21 @@ func newUser(uid string) managed.User {
 	return managed.NewUser(uid, client, config)
 }
 
+func echoEnvVarInPod(pod managed.Pod, envVar string, nContainer int) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	var err error
+	stdout, stderr, err = pod.Client.PodExec([]string{"sh", "-c", fmt.Sprintf("echo $%s", envVar)}, pod.Object, nContainer)
+	errBytes := stderr.Bytes()
+	if err != nil {
+		return "", string(errBytes), err
+	}
+	outBytes := stdout.Bytes()
+	return string(outBytes), string(errBytes), nil
+}
+
 func TestPodCreation(t *testing.T) {
 	// First delete all of the testUser's pods
+	t.Log("Deleting all testUser pods")
 	err := testingutil.DeleteAllUserPods(testingutil.TestUser)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -38,8 +52,9 @@ func TestPodCreation(t *testing.T) {
 	defaultRequests := testingutil.GetStandardPodRequests()
 	u := newUser(testingutil.TestUser)
 	mandatoryEnvVars := map[string]string{"HOME_SERVER": homeServer, "SD_UID": u.UserID}
-	for _, request := range defaultRequests {
+	for podType, request := range defaultRequests {
 		for i := 0; i < 2; i++ {
+			t.Logf("Creating %s pod", podType)
 			pc, err := NewPodCreator(request.YamlURL, u.UserID, remoteIP, request.Settings, u.Client, u.GlobalConfig)
 			if err != nil {
 				t.Fatalf("Could't initialize podcreator for %s", err.Error())
@@ -148,6 +163,8 @@ func TestPodCreation(t *testing.T) {
 
 func TestPostCreationState(t *testing.T) {
 	u := newUser(testingutil.TestUser)
+	defaultRequests := testingutil.GetStandardPodRequests()
+	mandatoryEnvVars := map[string]string{"HOME_SERVER": homeServer, "SD_UID": u.UserID}
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatal(err.Error())
@@ -233,6 +250,58 @@ func TestPostCreationState(t *testing.T) {
 			}
 			if currentValue != value {
 				t.Fatalf("Pod %s has %s=%s in its pod cache, but the real value of the token is %s", pod.Object.Name, key, value, currentValue)
+			}
+		}
+
+		// Then check environment variables
+		// Find the pod type to know what the settings should be
+		foundPodType := false
+		var thisPodType string
+		for podType, _ := range defaultRequests {
+			if strings.Contains(pod.Object.Name, podType) {
+				foundPodType = true
+				thisPodType = podType
+				break
+			}
+		}
+		if foundPodType {
+			containerEnvVars := defaultRequests[thisPodType].Settings
+			for container, vars := range containerEnvVars {
+				// Find the container number
+				foundContainer := false
+				var nContainer int
+				for i, containerObject := range pod.Object.Spec.Containers {
+					if containerObject.Name == container {
+						nContainer = i
+						foundContainer = true
+					}
+				}
+				if foundContainer {
+					for key, value := range vars {
+						stdout, stderr, err := echoEnvVarInPod(pod, key, nContainer)
+						if err != nil {
+							t.Fatalf("Couldn't get pod %s container %s environment variable %s: %s, stderr %s", pod.Object.Name, container, key, err.Error(), stderr)
+						}
+						currentValue := strings.TrimSpace(stdout)
+						if value != currentValue {
+							t.Fatalf("Pod %s container %s environment variable %s should be %s but is %s", pod.Object.Name, container, key, value, currentValue)
+						}
+					}
+				} else { // if there wasn't found a container whose name matches the container name in settings
+					t.Logf("Pod %s has settings with container name %s, but doesn't have a container by that name", pod.Object.Name, container)
+				}
+			}
+		}
+		for i, container := range pod.Object.Spec.Containers {
+			for key, value := range mandatoryEnvVars {
+				stdout, stderr, err := echoEnvVarInPod(pod, key, i)
+				if err != nil {
+					t.Fatalf("Couldn't check mandatory env var %s in pod %s container %s: %s, stderr %s", key, pod.Object.Name, container.Name, err.Error(), stderr)
+				}
+				currentValue := strings.TrimSpace(stdout)
+				if value != currentValue {
+					t.Fatalf("Pod %s container %s environment variable %s should be %s but is %s", pod.Object.Name, container.Name, key, value, currentValue)
+				}
 			}
 		}
 	}
