@@ -91,49 +91,6 @@ func exampleSshService(podName string, publicIP string) *apiv1.Service {
 	}
 }
 
-func ensureUserHasNPods(n int) error {
-	s := newServer()
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
-	userPodList, err := u.ListPods()
-	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't list user pods %s", err.Error()))
-	}
-	startingNumOfPods := len(userPodList)
-	defaultRequests := testingutil.GetStandardPodRequests()
-	var podTypes []string
-	for key, _ := range defaultRequests {
-		podTypes = append(podTypes, key)
-	}
-
-	var readyChannels []*util.ReadyChannel
-	// As long as the user has too few pods, create one of the standard ones
-	for i := startingNumOfPods; i < n; i++ {
-		// Cycle through each of the podTypes in the defaultRequests
-		podType := podTypes[(i-startingNumOfPods)%len(podTypes)]
-		podName, err := testingutil.CreatePod(defaultRequests[podType])
-		if err != nil {
-			return errors.New(fmt.Sprintf("Failed while creating %s pod: %s", podType, err.Error()))
-		}
-		ready := util.NewReadyChannel(s.GlobalConfig.TimeoutCreate)
-		go testingutil.WatchCreatePod(testingutil.TestUser, podName, ready)
-		readyChannels = append(readyChannels, ready)
-	}
-	// Wait for all readyChannels to receive true
-	if !util.ReceiveReadyChannels(readyChannels) {
-		return errors.New("Not all pods reached ready state")
-	}
-
-	// Double check that the right number of pods exists now
-	userPodList, err = u.ListPods()
-	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't list user pods %s", err.Error()))
-	}
-	if len(userPodList) < n {
-		return errors.New(fmt.Sprintf("User should have %d pods now, but only %d exist.", n, len(userPodList)))
-	}
-	return nil
-}
-
 func newServer() *Server {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
@@ -183,7 +140,7 @@ func TestRemoteIP(t *testing.T) {
 func TestDeleteAllUserPods(t *testing.T) {
 	s := newServer()
 	// First ensure that the user has at least 2 pods to delete
-	err := ensureUserHasNPods(2)
+	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, 2, s.GlobalConfig)
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -245,7 +202,7 @@ func TestDeleteAllUserPods(t *testing.T) {
 	}
 
 	// Make sure that there are no pod caches left for pods the user previously owned
-	dir, err := os.Open("/tmp/tokens")
+	dir, err := os.Open(s.GlobalConfig.TokenDir)
 	if err != nil {
 		t.Fatalf("Couldn't open token directory: %s", err.Error())
 	}
@@ -410,7 +367,7 @@ func TestGetPods(t *testing.T) {
 	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
 
 	// Make sure the user has at least two of each of the standard pods
-	err := ensureUserHasNPods(2 * len(testingutil.GetStandardPodRequests()))
+	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, 2*len(testingutil.GetStandardPodRequests()), s.GlobalConfig)
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -449,7 +406,7 @@ func TestDeletePod(t *testing.T) {
 	s := newServer()
 	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
 
-	err := ensureUserHasNPods(2 * len(testingutil.GetStandardPodRequests()))
+	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, 2*len(testingutil.GetStandardPodRequests()), s.GlobalConfig)
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -761,7 +718,7 @@ func TestCleanAllUnused(t *testing.T) {
 
 	// Ensure the testuser has some pods and their services that shouldn't be affected by cleanAllUnused
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := ensureUserHasNPods(len(defaultRequests))
+	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, len(defaultRequests), s.GlobalConfig)
 	if err != nil {
 		t.Fatal(err.Error())
 	}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func newUser(uid string) managed.User {
@@ -151,152 +149,6 @@ func TestPodCreation(t *testing.T) {
 			}
 			if storageRequired != pc.requiresUserStorage() {
 				t.Fatalf("requiresUserStorage returns %t when storageRequired is %t", pc.requiresUserStorage(), storageRequired)
-			}
-		}
-	}
-}
-
-func TestPostCreationState(t *testing.T) {
-	u := newUser(testingutil.TestUser)
-	defaultRequests := testingutil.GetStandardPodRequests()
-	mandatoryEnvVars := map[string]string{"HOME_SERVER": testingutil.HomeServer, "SD_UID": u.UserID}
-	podList, err := u.ListPods()
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-	// Check that user storage exists
-	pvList, err := u.Client.ListPV(u.GetStorageListOptions())
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-	if len(pvList.Items) == 0 {
-		t.Fatal("User storage PV not present")
-	}
-	pvcList, err := u.Client.ListPVC(u.GetStorageListOptions())
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-	if len(pvcList.Items) == 0 {
-		t.Fatal("User storage PVC not present")
-	}
-
-	// Check the success of the start jobs for all of the user's pods
-	for _, pod := range podList {
-		// Check for ssh if needed
-		var sshPort int32 = 0
-		needsSsh := false
-		for _, container := range pod.Object.Spec.Containers {
-			for _, port := range container.Ports {
-				if port.ContainerPort == 22 {
-					needsSsh = true
-					// If the pod requires a service to forward port 22
-					serviceList, err := pod.ListServices()
-					if err != nil {
-						t.Fatal(err.Error())
-					}
-					has := false
-					for _, svc := range serviceList.Items {
-						if svc.Name == fmt.Sprintf("%s-ssh", pod.Object.Name) {
-							has = true
-							// get the sshPort
-							for _, portEntry := range svc.Spec.Ports {
-								if portEntry.TargetPort == intstr.FromInt(22) {
-									sshPort = portEntry.NodePort
-								}
-							}
-							break
-						}
-					}
-					if !has {
-						t.Fatalf("pod %s requires ssh service and service doesn't exist", pod.Object.Name)
-					}
-					break
-				}
-			}
-		}
-
-		// Check that the data saved in the podCache matches the state of the pod
-		podInfo := pod.GetPodInfo()
-		// First the sshPort in OtherResourceInfo
-		if needsSsh {
-			if sshPort == 0 {
-				t.Fatalf("Pod %s needs ssh port, but its service didn't have the listed targetPort", pod.Object.Name)
-			}
-			sshPortAsString := fmt.Sprintf("%d", sshPort)
-			if podInfo.OtherResourceInfo["sshPort"] != sshPortAsString {
-				t.Fatalf("Pod %s has a sshPort %d, but %s is saved in its podCache", pod.Object.Name, sshPort, podInfo.OtherResourceInfo["sshPort"])
-			}
-		}
-		// Then all of the tokens
-		for key, value := range podInfo.Tokens {
-			hasKey := false
-			for annotationKey, annotationValue := range pod.Object.ObjectMeta.Annotations {
-				if annotationKey == key && annotationValue == "copyForFrontend" {
-					hasKey = true
-					break
-				}
-			}
-			if !hasKey {
-				t.Fatalf("Pod %s has key %s in tokens, but isn't specified in annotations", pod.Object.Name, key)
-			}
-			currentValue, err := pod.GetToken(key)
-			if err != nil {
-				t.Fatalf("Error retrieving token for pod %s: %s", pod.Object.Name, err.Error())
-			}
-			if currentValue != value {
-				t.Fatalf("Pod %s has %s=%s in its pod cache, but the real value of the token is %s", pod.Object.Name, key, value, currentValue)
-			}
-		}
-
-		// Then check environment variables
-		// Find the pod type to know what the settings should be
-		foundPodType := false
-		var thisPodType string
-		for podType, _ := range defaultRequests {
-			if strings.Contains(pod.Object.Name, podType) {
-				foundPodType = true
-				thisPodType = podType
-				break
-			}
-		}
-		if foundPodType {
-			containerEnvVars := defaultRequests[thisPodType].Settings
-			for container, vars := range containerEnvVars {
-				// Find the container number
-				foundContainer := false
-				var nContainer int
-				for i, containerObject := range pod.Object.Spec.Containers {
-					if containerObject.Name == container {
-						nContainer = i
-						foundContainer = true
-					}
-				}
-				if foundContainer {
-					for key, value := range vars {
-						stdout, stderr, err := echoEnvVarInPod(pod, key, nContainer)
-						if err != nil {
-							t.Fatalf("Couldn't get pod %s container %s environment variable %s: %s, stderr %s", pod.Object.Name, container, key, err.Error(), stderr)
-						}
-						currentValue := strings.TrimSpace(stdout)
-						if value != currentValue {
-							t.Fatalf("Pod %s container %s environment variable %s should be %s but is %s", pod.Object.Name, container, key, value, currentValue)
-						}
-					}
-				} else { // if there wasn't found a container whose name matches the container name in settings
-					t.Logf("Pod %s has settings with container name %s, but doesn't have a container by that name", pod.Object.Name, container)
-				}
-			}
-		}
-		for i, container := range pod.Object.Spec.Containers {
-			for key, value := range mandatoryEnvVars {
-				stdout, stderr, err := echoEnvVarInPod(pod, key, i)
-				if err != nil {
-					t.Fatalf("Couldn't check mandatory env var %s in pod %s container %s: %s, stderr %s", key, pod.Object.Name, container.Name, err.Error(), stderr)
-				}
-				currentValue := strings.TrimSpace(stdout)
-				if value != currentValue {
-					t.Fatalf("Pod %s container %s environment variable %s should be %s but is %s", pod.Object.Name, container.Name, key, value, currentValue)
-				}
 			}
 		}
 	}

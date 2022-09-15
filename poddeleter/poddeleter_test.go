@@ -57,21 +57,21 @@ func ensureUserHasEach(requests map[string]testingutil.CreatePodRequest) error {
 
 func TestFailDeletePods(t *testing.T) {
 	// Make sure the user has one of each of the standard pod types to attempt to delete
-	podRequests := testingutil.GetStandardPodRequests()
-	err := ensureUserHasEach(podRequests)
+	u := newUser(testingutil.TestUser)
+	defaultRequests := testingutil.GetStandardPodRequests()
+	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests, u.GlobalConfig)
 	if err != nil {
 		t.Fatalf("Couldn't ensure user had all pods: %s", err.Error())
 	}
 
 	// Then attempt to delete one with an incorrect userID
-	u := newUser(testingutil.TestUser)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 	var podToDelete managed.Pod
-	// Range over podRequests just to take the first key
-	for podType, _ := range podRequests {
+	// Range over defaultRequests just to take the first key
+	for podType, _ := range defaultRequests {
 		found := false
 		for _, pod := range podList {
 			if strings.Contains(pod.Object.Name, podType) {
@@ -103,8 +103,9 @@ func TestFailDeletePods(t *testing.T) {
 
 func TestDeletePod(t *testing.T) {
 	// Make sure the user has one of each of the standard pod types to attempt to delete
-	podRequests := testingutil.GetStandardPodRequests()
-	err := ensureUserHasEach(podRequests)
+	u := newUser(testingutil.TestUser)
+	defaultRequests := testingutil.GetStandardPodRequests()
+	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests, u.GlobalConfig)
 	if err != nil {
 		t.Fatalf("Couldn't ensure user had all pods: %s", err.Error())
 	}
@@ -112,13 +113,12 @@ func TestDeletePod(t *testing.T) {
 	// Then delete one of each of the user's pods for each of the standard pod types,
 	// first create the slice of podsToDelete by finding one of each type in the
 	// user's podList
-	u := newUser(testingutil.TestUser)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 	var podsToDelete []managed.Pod
-	for podType, _ := range podRequests {
+	for podType := range defaultRequests {
 		found := false
 		for _, pod := range podList {
 			if strings.Contains(pod.Object.Name, podType) {

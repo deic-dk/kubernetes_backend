@@ -453,13 +453,6 @@ func (p *Pod) loadPodCache() (podCache, error) {
 	return cache, nil
 }
 
-func (p *Pod) CheckState() {
-	// reload with client.ListPods and check p.Object.Status
-	// if needs user storage, check that it's present
-	// if needsssh, check that it's present
-	// check that cache is filled
-}
-
 func (p *Pod) DeleteAllServices(finished *util.ReadyChannel) error {
 	serviceList, err := p.ListServices()
 	if err != nil {
