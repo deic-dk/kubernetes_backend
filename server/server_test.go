@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -137,6 +138,46 @@ func newServer() *Server {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
 	return New(client, config)
+}
+
+func dummyHttpRequest(forwarded string, remoteAddr string) *http.Request {
+	request := &http.Request{}
+	request.Header = make(map[string][]string)
+	if forwarded != "" {
+		request.Header["X-Forwarded-For"] = []string{forwarded, "somethingelse"}
+	}
+	request.RemoteAddr = remoteAddr
+	return request
+}
+
+func TestRemoteIP(t *testing.T) {
+	s := newServer()
+	tests := []struct {
+		input  *http.Request
+		output string
+	}{
+		{dummyHttpRequest("10.0.0.20:1234", ""), "10.0.0.20"},
+		{dummyHttpRequest("1.2.3.4:1234", ""), "1.2.3.4"},
+		{dummyHttpRequest("1.2.3.4", ""), "1.2.3.4"},
+		{dummyHttpRequest("1.2.3.4", "anything"), "1.2.3.4"},
+		{dummyHttpRequest("", ""), ""},
+		{dummyHttpRequest("foobar", ""), ""},
+		{dummyHttpRequest("foobar", "foobar"), ""},
+		{dummyHttpRequest("", "foobar"), ""},
+		{dummyHttpRequest("", "1.2.3.4"), "1.2.3.4"},
+		{dummyHttpRequest("", "127.0.0.1:1234"), s.GlobalConfig.TestingHost},
+		{dummyHttpRequest("127.0.0.1", ""), s.GlobalConfig.TestingHost},
+		{dummyHttpRequest("", "::1"), s.GlobalConfig.TestingHost},
+		{dummyHttpRequest("", "[::1]:12345"), s.GlobalConfig.TestingHost},
+		{dummyHttpRequest("", "[fe80::0]:1234"), "fe80::0"},
+		{dummyHttpRequest("", "fe80::0"), "fe80::0"},
+	}
+	for _, test := range tests {
+		output := s.getRemoteIP(test.input)
+		if output != test.output {
+			t.Fatalf("Failed getRemoteIP(%+v). Got %s, expected %s", test.input, output, test.output)
+		}
+	}
 }
 
 func TestDeleteAllUserPods(t *testing.T) {
