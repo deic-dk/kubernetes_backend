@@ -2,6 +2,7 @@ package podcreator
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"regexp"
 	"testing"
@@ -19,6 +20,59 @@ func newUser(uid string) managed.User {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
 	return managed.NewUser(uid, client, config)
+}
+
+func checkEnvironmentVars(pod v1.Pod, request testingutil.CreatePodRequest, mandatoryEnvVars map[string]string) error {
+	// Check environment variables are all set in the targetPod
+	for containerName, envVars := range request.Settings {
+		var targetPodContainer v1.Container
+		hasContainer := false
+		// Find the container with the matching name
+		for _, container := range pod.Spec.Containers {
+			if container.Name == containerName {
+				targetPodContainer = container
+				hasContainer = true
+				break
+			}
+		}
+		if !hasContainer {
+			return errors.New(fmt.Sprintf("Pod %s doesn't have container %s, should be faulty input in the request containerEnvVars", pod.Name, containerName))
+			continue
+		}
+		for key, value := range envVars {
+			hasKey := false
+			for _, env := range targetPodContainer.Env {
+				if env.Name == key {
+					hasKey = true
+					if value != env.Value {
+						return errors.New(fmt.Sprintf("targetPod %s container has key %s value %s, should be %s", pod.Name, key, env.Value, value))
+					}
+				}
+			}
+			if !hasKey {
+				return errors.New(fmt.Sprintf("targetPod %s container doesn't have key %s", pod.Name, key))
+			}
+		}
+	}
+
+	// Check that mandatory environment variables are all set
+	for _, targetContainer := range pod.Spec.Containers {
+		for key, value := range mandatoryEnvVars {
+			has := false
+			for _, env := range targetContainer.Env {
+				if env.Name == key {
+					has = true
+					if value != env.Value {
+						return errors.New(fmt.Sprintf("targetPod %s container %s had incorrectly set key %s = %s, should be %s", pod.Name, targetContainer.Name, key, env.Value, value))
+					}
+				}
+			}
+			if !has {
+				return errors.New(fmt.Sprintf("targetPod %s container %s doesn't have key %s", pod.Name, targetContainer.Name, key))
+			}
+		}
+	}
+	return nil
 }
 
 func echoEnvVarInPod(pod managed.Pod, envVar string, nContainer int) (string, string, error) {
@@ -41,13 +95,21 @@ func TestPodCreation(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	// Then attempt to create two of each of the standard pod types with default parameters
+	// Then attempt to create two of each of the standard pod types
 	defaultRequests := testingutil.GetStandardPodRequests()
 	u := newUser(testingutil.TestUser)
-	mandatoryEnvVars := map[string]string{"HOME_SERVER": testingutil.HomeServer, "SD_UID": u.UserID}
-	for podType, request := range defaultRequests {
+	for _, defaultRequest := range defaultRequests {
 		for i := 0; i < 2; i++ {
-			t.Logf("Creating %s pod", podType)
+			request := defaultRequest
+			// If this is the second pod of this type, add some envVars to the request
+			if i == 1 {
+				for container, vars := range request.Settings {
+					for key, value := range vars {
+						request.Settings[container][key] = fmt.Sprintf("%s-extra", value)
+					}
+				}
+			}
+
 			pc, err := NewPodCreator(request.YamlURL, u.UserID, testingutil.RemoteIP, request.Settings, u.Client, u.GlobalConfig)
 			if err != nil {
 				t.Fatalf("Could't initialize podcreator for %s", err.Error())
@@ -56,54 +118,9 @@ func TestPodCreation(t *testing.T) {
 				t.Fatal("Didn't initialize targetPod")
 			}
 
-			// Check environment variables are all set in the targetPod
-			for containerName, envVars := range request.Settings {
-				var targetPodContainer v1.Container
-				hasContainer := false
-				// Find the container with the matching name
-				for _, container := range pc.targetPod.Spec.Containers {
-					if container.Name == containerName {
-						targetPodContainer = container
-						hasContainer = true
-						break
-					}
-				}
-				if !hasContainer {
-					t.Logf("Pod %s doesn't have container %s, should be faulty input in the request containerEnvVars", pc.targetPod.Name, containerName)
-					continue
-				}
-				for key, value := range envVars {
-					hasKey := false
-					for _, env := range targetPodContainer.Env {
-						if env.Name == key {
-							hasKey = true
-							if value != env.Value {
-								t.Fatalf("targetPod %s container has key %s value %s, should be %s", pc.targetPod.Name, key, env.Value, value)
-							}
-						}
-					}
-					if !hasKey {
-						t.Fatalf("targetPod %s container doesn't have key %s", pc.targetPod.Name, key)
-					}
-				}
-			}
-
-			// Check that mandatory environment variables are all set
-			for _, targetContainer := range pc.targetPod.Spec.Containers {
-				for key, value := range mandatoryEnvVars {
-					has := false
-					for _, env := range targetContainer.Env {
-						if env.Name == key {
-							has = true
-							if value != env.Value {
-								t.Fatalf("targetPod %s container %s had incorrectly set key %s = %s, should be %s", pc.targetPod.Name, targetContainer.Name, key, env.Value, value)
-							}
-						}
-					}
-					if !has {
-						t.Fatalf("targetPod %s container %s doesn't have key %s", pc.targetPod.Name, targetContainer.Name, key)
-					}
-				}
+			err = checkEnvironmentVars(*pc.targetPod, request, pc.getMandatoryEnvVars())
+			if err != nil {
+				t.Fatal(err.Error())
 			}
 
 			// check targetPod name
