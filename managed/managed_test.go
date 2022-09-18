@@ -386,5 +386,21 @@ func TestJobs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		// Now just check podCache deletion and reloading in reload mode
+		// (because RunStartJobsWhenReady allows multiple attempts to get tokens)
+		err = os.Remove(pod.GetCacheFilename())
+		if err != nil {
+			t.Fatalf("Error deleting podcache for pod %s: %s", pod.Object.Name, err.Error())
+		}
+		err = pod.CreateAndSavePodCache(true)
+		if err != nil {
+			t.Fatalf("Error reloading podCache for pod %s: %s", pod.Object.Name, err.Error())
+		}
+		// Check after this last reload
+		err = checkStartJobSuccess(pod)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

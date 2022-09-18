@@ -718,7 +718,7 @@ func TestCleanAllUnused(t *testing.T) {
 
 	// Ensure the testuser has some pods and their services that shouldn't be affected by cleanAllUnused
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, len(defaultRequests), s.GlobalConfig)
+	err := testingutil.EnsureUserHasEach(testingutil.TestUser, defaultRequests, s.GlobalConfig)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -880,3 +880,43 @@ func TestCleanAllUnused(t *testing.T) {
 		t.Fatal("Failed to delete all user pods and storage")
 	}
 }
+
+func TestReloadCache(t *testing.T) {
+	s := newServer()
+	// First ensure that the user has each of the standard pods
+	defaultRequests := testingutil.GetStandardPodRequests()
+	err := testingutil.EnsureUserHasEach(testingutil.TestUser, defaultRequests, s.GlobalConfig)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	// Then delete their podCaches
+	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
+	podList, err := u.ListPods()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	for _, pod := range podList {
+		// Delete the cache file
+		err := os.Remove(pod.GetCacheFilename())
+		if err != nil {
+			t.Fatalf("Error deleting podcache for pod %s: %s", pod.Object.Name, err.Error())
+		}
+	}
+
+	// Reload the podCaches
+	err = s.ReloadPodCaches()
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// Check that all podCaches are there again
+	for _, pod := range podList {
+		_, err := os.Open(pod.GetCacheFilename())
+		if err != nil {
+			t.Fatalf("Error loading podCache for pod %s: %s", pod.Object.Name, err.Error())
+		}
+	}
+}
+

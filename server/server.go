@@ -736,3 +736,23 @@ func (s *Server) ServeCleanAllUnused(w http.ResponseWriter, r *http.Request) {
 	// write the response
 	w.WriteHeader(status)
 }
+
+func (s *Server) ReloadPodCaches() error {
+	allPodList, err := s.Client.ListPods(metav1.ListOptions{})
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list pods: %s", err.Error()))
+	}
+	for _, podObject := range allPodList.Items {
+		// If this is a pod without an owner, skip it
+		userID := util.GetUserIDFromLabels(podObject.ObjectMeta.Labels)
+		if userID == "" {
+			continue
+		}
+		pod := managed.NewPod(&podObject, s.Client, s.GlobalConfig)
+		err := pod.CreateAndSavePodCache(true)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Failed to save podcache for pod %s: %s", podObject.Name, err.Error()))
+		}
+	}
+	return nil
+}

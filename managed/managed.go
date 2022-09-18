@@ -29,7 +29,7 @@ type User struct {
 
 func NewUser(userID string, client k8sclient.K8sClient, globalConfig util.GlobalConfig) User {
 	if userID == "" {
-		return User{Client: client}
+		panic("UserID cannot be empty when creating user")
 	}
 
 	name, domain, _ := strings.Cut(userID, "@")
@@ -44,9 +44,7 @@ func NewUser(userID string, client k8sclient.K8sClient, globalConfig util.Global
 
 func (u *User) GetListOptions() metav1.ListOptions {
 	opt := metav1.ListOptions{}
-	if u.UserID != "" {
-		opt.LabelSelector = fmt.Sprintf("user=%s,domain=%s", u.Name, u.Domain)
-	}
+	opt.LabelSelector = fmt.Sprintf("user=%s,domain=%s", u.Name, u.Domain)
 	return opt
 }
 
@@ -301,7 +299,10 @@ type Pod struct {
 
 func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient, globalConfig util.GlobalConfig) Pod {
 	userID := util.GetUserIDFromLabels(existingPod.ObjectMeta.Labels)
-	owner := NewUser(userID, client, globalConfig)
+	var owner User
+	if userID != "" {
+		owner = NewUser(userID, client, globalConfig)
+	}
 	return Pod{
 		Object:       existingPod,
 		Client:       client,
@@ -310,7 +311,7 @@ func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient, globalConfig uti
 	}
 }
 
-func (p *Pod) getCacheFilename() string {
+func (p *Pod) GetCacheFilename() string {
 	return fmt.Sprintf("%s/%s", p.GlobalConfig.TokenDir, p.Object.Name)
 }
 
@@ -419,7 +420,7 @@ func (p *Pod) savePodCache(cache podCache) error {
 	}
 
 	// if the token file exists, delete it
-	err = os.Remove(p.getCacheFilename())
+	err = os.Remove(p.GetCacheFilename())
 	if err != nil {
 		// if there was an error other than that the file didn't exist
 		if !os.IsNotExist(err) {
@@ -428,7 +429,7 @@ func (p *Pod) savePodCache(cache podCache) error {
 	}
 
 	// save the buffer
-	err = ioutil.WriteFile(p.getCacheFilename(), b.Bytes(), 0600)
+	err = ioutil.WriteFile(p.GetCacheFilename(), b.Bytes(), 0600)
 	if err != nil {
 		return err
 	}
@@ -438,7 +439,7 @@ func (p *Pod) savePodCache(cache podCache) error {
 func (p *Pod) loadPodCache() (podCache, error) {
 	var cache podCache
 	// create an io.Reader for the file
-	file, err := os.Open(p.getCacheFilename())
+	file, err := os.Open(p.GetCacheFilename())
 	if err != nil {
 		return cache, err
 	}
@@ -492,7 +493,7 @@ func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.Re
 	}
 
 	// Delete the cache file if it exists
-	err := os.Remove(p.getCacheFilename())
+	err := os.Remove(p.GetCacheFilename())
 	if err != nil {
 		// if there was an error other than that the file didn't exist, log it
 		if !os.IsNotExist(err) {
@@ -540,14 +541,7 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 	if p.NeedsSshService() {
 		p.startSshService()
 	}
-	tokens := p.getAllTokens(false)
-	otherResourceInfo := p.getOtherResourceInfo()
-	err = p.savePodCache(
-		podCache{
-			Tokens:            tokens,
-			OtherResourceInfo: otherResourceInfo,
-		},
-	)
+	err = p.CreateAndSavePodCache(false)
 	if err != nil {
 		fmt.Printf("Failed to save pod cache for pod %s: %s\n", p.Object.Name, err.Error())
 		finishedStartJobs.Send(false)
@@ -557,6 +551,17 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 	// TODO ingress
 
 	finishedStartJobs.Send(true)
+}
+
+func (p *Pod) CreateAndSavePodCache(reload bool) error {
+	tokens := p.getAllTokens(reload)
+	otherResourceInfo := p.getOtherResourceInfo()
+	return p.savePodCache(
+		podCache{
+			Tokens:            tokens,
+			OtherResourceInfo: otherResourceInfo,
+		},
+	)
 }
 
 // for each pod.metadata.annotations[key]=="copyForFrontend",
