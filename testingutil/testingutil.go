@@ -3,11 +3,11 @@ package testingutil
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"errors"
-	"strings"
+	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strings"
 
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 )
@@ -49,6 +49,15 @@ type deleteAllUserPodsRequest struct {
 
 type deleteAllUserPodsResponse struct {
 	Deleted bool `json:"deleted"`
+}
+
+type deletePodRequest struct {
+	UserID  string `json:"user_id"`
+	PodName string `json:"pod_name"`
+}
+
+type deletePodResponse struct {
+	Requested bool `json:"requested"`
 }
 
 type getPodNamesRequest struct {
@@ -154,6 +163,43 @@ func DeleteAllUserPods(userID string) error {
 	return nil
 }
 
+func DeletePod(userID string, podName string) (bool, error) {
+	// Construct the request
+	request := deletePodRequest{
+		UserID:  userID,
+		PodName: podName,
+	}
+	requestBody, err := json.Marshal(&request)
+	if err != nil {
+		return false, err
+	}
+
+	// Send the request
+	response, err := http.Post("http://localhost/delete_pod", "application/json", bytes.NewReader(requestBody))
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	// Check status code
+	if response.StatusCode != http.StatusOK {
+		return false, errors.New(fmt.Sprintf("Got error code %s", response.Status))
+	}
+	// Decode the body
+	responseBody, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return false, err
+	}
+	var unmarshalled deletePodResponse
+	err = json.Unmarshal(responseBody, &unmarshalled)
+	if err != nil {
+		return false, err
+	}
+
+	// Return the result
+
+	return unmarshalled.Requested, nil
+}
+
 // Get a map of all standard pod types to their CreatePodRequests with default params
 func GetStandardPodRequests() map[string]CreatePodRequest {
 	response := make(map[string]CreatePodRequest)
@@ -191,6 +237,10 @@ func GetPodNames(userID string) ([]string, error) {
 		return podNames, err
 	}
 	defer response.Body.Close()
+	// Check status code
+	if response.StatusCode != http.StatusOK {
+		return podNames, errors.New(fmt.Sprintf("Got error code %s", response.Status))
+	}
 	// Decode the body
 	responseBody, err := ioutil.ReadAll(response.Body)
 	if err != nil {

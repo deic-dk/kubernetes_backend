@@ -30,7 +30,6 @@ type CreatePodRequest struct {
 	UserID  string `json:"user_id"`
 	//Settings[container_name][env_var_name] = env_var_value
 	ContainerEnvVars map[string]map[string]string `json:"settings"`
-	AllEnvVars       map[string]string
 	RemoteIP         string
 }
 
@@ -95,6 +94,7 @@ const (
 	CreatingPods    watchMapName = 0
 	DeletingPods    watchMapName = 1
 	DeletingStorage watchMapName = 2
+	userIDregex                  = `^[a-z0-9][-a-z0-9._]*[@]?[-a-z0-9._]*[a-z0-9]$`
 )
 
 func New(client k8sclient.K8sClient, globalConfig util.GlobalConfig) *Server {
@@ -185,6 +185,14 @@ func (s *Server) getRemoteIP(r *http.Request) string {
 	return remoteIP
 }
 
+// Return true if userID matches the regex to check for validity
+// Some userIDs contain `@`, which we replace with `-`, and otherwise
+// userIDs are restricted to the characters allowed in kubernetes labels
+func validUserID(userID string) bool {
+	r := regexp.MustCompile(userIDregex)
+	return r.MatchString(userID)
+}
+
 // Fills in a getPodsResponse with information about all the pods owned by the user.
 // If the username string is empty, use all pods in the namespace.
 func (s *Server) getPods(request GetPodsRequest) (GetPodsResponse, error) {
@@ -223,13 +231,19 @@ func (s *Server) ServeGetPods(w http.ResponseWriter, r *http.Request) {
 	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("getPods request: %+v\n", request)
 
-	// get the list of pods
-	response, err := s.getPods(request)
-	var status int
-	if err != nil {
-		status = http.StatusBadRequest
-	} else {
-		status = http.StatusOK
+	// Default to an error status and empty response
+	status := http.StatusBadRequest
+	var response GetPodsResponse
+	// If the input is valid
+	if validUserID(request.UserID) {
+		// get the list of pod info
+		r, err := s.getPods(request)
+		if err != nil {
+			fmt.Printf("Error calling GetPods: %s", err.Error())
+		} else { // If it was successful, set the status and response
+			status = http.StatusOK
+			response = r
+		}
 	}
 
 	// write the response
@@ -268,13 +282,6 @@ func (s *Server) createPod(request CreatePodRequest, finished *util.ReadyChannel
 		CreatingPods,
 	)
 
-	// If the readyChannel gets a `false`, then call for pod deletion
-	go func() {
-		if !finished.Receive() {
-			s.deletePodIfFailedCreate(pod.Object.Name, request)
-		}
-	}()
-
 	// Return the response
 	response.PodName = pod.Object.Name
 	return response, nil
@@ -289,15 +296,31 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("createPod request: %+v\n", request)
 
-	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutCreate)
-	response, err := s.createPod(request, finished)
-
-	var status int
-	if err != nil {
-		status = http.StatusBadRequest
-		fmt.Printf("Error: %s\n", err.Error())
-	} else {
-		status = http.StatusOK
+	// Default to an error status and empty response
+	status := http.StatusBadRequest
+	var response CreatePodResponse
+	// If the input is valid
+	if validUserID(request.UserID) {
+		// Call for pod creation
+		finished := util.NewReadyChannel(s.GlobalConfig.TimeoutCreate)
+		r, err := s.createPod(request, finished)
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+		} else {
+			// If the creation call was sucessful, set the response and status
+			status = http.StatusOK
+			response = r
+			// Wait for the result of creation, log the result, and call for deletion
+			// if something went wrong
+			go func() {
+				if finished.Receive() {
+					fmt.Printf("Completed start jobs for Pod %s\n", response.PodName)
+				} else {
+					fmt.Printf("Warning: failed to create pod %s or complete start jobs\n", response.PodName)
+					s.deletePodIfFailedCreate(response.PodName, request)
+				}
+			}()
+		}
 	}
 
 	// write the response
@@ -305,14 +328,6 @@ func (s *Server) ServeCreatePod(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
 
-	go func() {
-		if finished.Receive() {
-			fmt.Printf("Completed start jobs for Pod %s\n", response.PodName)
-		} else {
-			fmt.Printf("Warning: failed to create pod %s or complete start jobs\n", response.PodName)
-			// TODO attempt to clean up the failed pod
-		}
-	}()
 }
 
 func (s *Server) watchCreatePod(request WatchCreatePodRequest) (WatchCreatePodResponse, error) {
@@ -469,14 +484,21 @@ func (s *Server) ServeDeletePod(w http.ResponseWriter, r *http.Request) {
 	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("deletePod request: %+v\n", request)
 
-	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
-	response, err := s.deletePod(request, finished)
-	var status int
-	if err != nil {
-		status = http.StatusBadRequest
-		fmt.Printf("Error: %s\n", err.Error())
-	} else {
-		status = http.StatusOK
+	// Default to an error status and empty response
+	status := http.StatusBadRequest
+	var response DeletePodResponse
+	// If the input is valid
+	if validUserID(request.UserID) {
+		// Call for pod deletion
+		finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
+		r, err := s.deletePod(request, finished)
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+		} else {
+			// If the delete request was successful, set the response and status
+			status = http.StatusOK
+			response = r
+		}
 	}
 
 	// write the response
@@ -591,23 +613,21 @@ func (s *Server) ServeDeleteAllUserPods(w http.ResponseWriter, r *http.Request) 
 	request.RemoteIP = s.getRemoteIP(r)
 	fmt.Printf("deleteAllUserPods request: %+v\n", request)
 
-	// give a long enough timout that it will accommodate slowly deleting PV/PVC in worst case
-	finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
-	err := s.deleteAllUserPods(request.UserID, finished)
-	var status int
+	// Default to an error status and empty response
+	status := http.StatusBadRequest
 	var response DeleteAllPodsResponse
-	if err != nil {
-		status = http.StatusBadRequest
-		response.Deleted = false
-		fmt.Printf("Error: %s\n", err.Error())
-	} else { // if the request was made without error
-		// wait for the result, and if it succeeds, set an okay response
-		if finished.Receive() {
-			status = http.StatusOK
-			response.Deleted = true
-		} else { // if it was requested successfully but failed to delete everything,
-			status = http.StatusOK
+	if validUserID(request.UserID) {
+		// give a long enough timout that it will accommodate slowly deleting PV/PVC in worst case
+		finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
+		err := s.deleteAllUserPods(request.UserID, finished)
+		if err != nil {
 			response.Deleted = false
+			fmt.Printf("Error: %s\n", err.Error())
+		} else {
+			// if the request was made without error, set the status
+			status = http.StatusOK
+			// wait for the result, and set the response to whether all objects were deleted
+			response.Deleted = finished.Receive()
 		}
 	}
 

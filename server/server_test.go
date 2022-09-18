@@ -920,3 +920,62 @@ func TestReloadCache(t *testing.T) {
 	}
 }
 
+func TestValidUser(t *testing.T) {
+	tests := []struct {
+		userID string
+		valid  bool
+	}{
+		{"foo@bar@baz", false},
+		{"foO@bar", false},
+		{"foo", true},
+		{"foo@bar", true},
+		{"foo@bar.baz", true},
+		{"foo@bar.baz-baz", true},
+		{"foo-bar.baz@foo.bar-baz", true},
+		{"foo.bar@bar.baz", true},
+		{"foo@", false},
+		{"foo.", false},
+		{".foo", false},
+		{"-foo", false},
+	}
+	for _, test := range tests {
+		if validUserID(test.userID) != test.valid {
+			t.Fatalf("validUserID fails for userID %s: %t and %t", test.userID, validUserID(test.userID), test.valid)
+		}
+
+		requests := testingutil.GetStandardPodRequests()
+		var request testingutil.CreatePodRequest
+		// Set `request` to the first available in the default requests
+		for _, defaultRequest := range requests {
+			request = defaultRequest
+			break
+		}
+
+		// Try to create a pod with this userID
+		request.UserID = test.userID
+		podName, err := testingutil.CreatePod(request)
+		// There should be an error iff this test.userID is valid
+		if (err == nil) != test.valid {
+			t.Fatalf("CreatePod had (didn't have) an error with the (in)valid userID %s", test.userID)
+		}
+
+		// Try to list this user's pods
+		_, err = testingutil.GetPodNames(test.userID)
+		if (err == nil) != test.valid {
+			t.Fatalf("GetPods had (didn't have) an error with the (in)valid userID %s", test.userID)
+		}
+
+		// Try to delete the pod
+		_, err = testingutil.DeletePod(test.userID, podName)
+		if (err == nil) != test.valid {
+			t.Fatalf("DeletePod had (didn't have) an error with the (in)valid userID %s", test.userID)
+		}
+
+		// Try to delete all the user's pods
+		err = testingutil.DeleteAllUserPods(test.userID)
+		if (err == nil) != test.valid {
+			t.Fatalf("DeleteAllUserPods had (didn't have) an error with the (in)valid userID %s", test.userID)
+		}
+	}
+}
+

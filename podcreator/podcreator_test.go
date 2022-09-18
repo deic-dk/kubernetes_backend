@@ -105,7 +105,7 @@ func TestPodCreation(t *testing.T) {
 			if i == 1 {
 				for container, vars := range request.Settings {
 					for key, value := range vars {
-						request.Settings[container][key] = fmt.Sprintf("%s-extra", value)
+						request.Settings[container][key] = fmt.Sprintf("%s-extra-with-$pecialchars/\\.'#@:æøå*\\$@.", value)
 					}
 				}
 			}
