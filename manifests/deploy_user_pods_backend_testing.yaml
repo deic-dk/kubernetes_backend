@@ -80,3 +80,49 @@ roleRef:
   name: provision-nfs
   apiGroup: rbac.authorization.k8s.io
 
+---
+apiVersion: v1
+kind: Pod
+metadata: 
+  name: user-pods-backend-testing
+  namespace: sciencedata-dev
+  labels:
+    app: user-pods-backend-testing
+spec:
+  serviceAccountName: user-pods-backend
+  imagePullSecrets:
+    - name: docker-registry-auth
+  containers:
+    - name: user-pods-backend-testing
+      image: dockerregistry.clement.tel/kubernetes_backend
+      env:
+        - name: "SSH_PUBLIC_KEY"
+          value: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n"
+        - name: "BACKEND_PUBLICIP"
+          value: "130.226.137.135"
+      ports:
+        - containerPort: 22
+          protocol: TCP
+        - containerPort: 80
+          protocol: TCP
+      securityContext:
+        capabilities:
+          add:
+            - "SYS_CHROOT"
+            - "AUDIT_WRITE"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-pods-backend-testing-ssh
+  namespace: sciencedata-dev
+spec:
+  type: NodePort
+  ports:
+    - port: 22
+      targetPort: 22
+      name: ssh
+      protocol: TCP
+      nodePort: 30002
+  selector:
+    app: user-pods-backend-testing
