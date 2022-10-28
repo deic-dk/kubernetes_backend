@@ -5,18 +5,17 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
-	"os"
-	"path"
 	"regexp"
 	"sync"
 	"time"
 
+	"github.com/spf13/viper"
 	yaml "gopkg.in/yaml.v3"
-
 	apiv1 "k8s.io/api/core/v1"
 )
 
-const configFile = "config.yaml"
+const configFilename = "config.yaml"
+const environmentPrefix = "backend"
 
 // type for signalling whether one-off events have completed successfully within a timeout
 type ReadyChannel struct {
@@ -125,11 +124,6 @@ type GlobalConfig struct {
 	TestingHost            string
 }
 
-func getConfigFilename() string {
-	goPath := os.Getenv("GOPATH")
-	return path.Join(goPath, "src/user_pods_k8s_backend/config.yaml")
-}
-
 func SaveGlobalConfig(c GlobalConfig) error {
 	buffer := new(bytes.Buffer)
 	encoder := yaml.NewEncoder(buffer)
@@ -137,7 +131,7 @@ func SaveGlobalConfig(c GlobalConfig) error {
 	if err != nil {
 		return err
 	}
-	err = ioutil.WriteFile(getConfigFilename(), buffer.Bytes(), 0600)
+	err = ioutil.WriteFile(configFilename, buffer.Bytes(), 0600)
 	if err != nil {
 		return err
 	}
@@ -146,17 +140,26 @@ func SaveGlobalConfig(c GlobalConfig) error {
 
 func MustLoadGlobalConfig() GlobalConfig {
 	var config GlobalConfig
-	// Open the config file
-	file, err := os.Open(getConfigFilename())
+	// Load the configuration
+
+	// Check values from the config file
+	viper.SetConfigFile(configFilename)
+	err := viper.ReadInConfig()
 	if err != nil {
 		panic(err.Error())
 	}
-	// Decode into the config struct
-	decoder := yaml.NewDecoder(file)
-	err = decoder.Decode(&config)
+
+	// And check values from the environment
+	// Overwrite if environment variable exists
+	viper.AutomaticEnv()
+	viper.SetEnvPrefix(environmentPrefix)
+	err = viper.Unmarshal(&config)
 	if err != nil {
 		panic(err.Error())
 	}
+	fmt.Printf("%+v", config)
+
+	// Validate the loaded configuration
 
 	// Check that WhitelistManifestRegex compiles to a regex
 	_, err = regexp.Compile(config.WhitelistManifestRegex)
