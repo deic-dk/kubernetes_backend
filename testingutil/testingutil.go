@@ -308,7 +308,7 @@ func EnsureUserHasEach(userID string, requests map[string]CreatePodRequest, conf
 	}
 
 	var readyChannels []*util.ReadyChannel
-	// As long as the user has too few pods, create one of the standard ones
+	// For each of the requests, check that one exists and create it if not
 	for podType, request := range requests {
 		hasPod := false
 		// Look through the user's PodList to see if one exists already

@@ -697,9 +697,9 @@ func TestWatchers(t *testing.T) {
 		errChan <- nil
 	}()
 
-	// Make sure the pod started and start jobs ran successfully
+	// Make sure the pod was deleted successfully
 	if !finished.Receive() {
-		t.Fatal("Pod didn't reach ready state with completed start jobs")
+		t.Fatal("Pod wasn't successfully deleted")
 	}
 
 	// Now that it's finished, try watching it again
