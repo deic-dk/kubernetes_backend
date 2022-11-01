@@ -706,7 +706,7 @@ func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
 
 	// Clean up pod caches
 	// Get a list of every filename in tokenDir
-	dir, err := os.Open(s.GlobalConfig.TokenDir)
+	dir, err := os.Open(s.GlobalConfig.PodCacheDir)
 	if err != nil {
 		return err
 	}
@@ -724,7 +724,7 @@ func (s *Server) cleanAllUnused(finished *util.ReadyChannel) error {
 		}
 		// If there is no pod whose name matches this file, then it is an orphaned podcache
 		if len(podList.Items) == 0 {
-			err := os.Remove(fmt.Sprintf("%s/%s", s.GlobalConfig.TokenDir, fileName))
+			err := os.Remove(fmt.Sprintf("%s/%s", s.GlobalConfig.PodCacheDir, fileName))
 			if err != nil {
 				return errors.New(fmt.Sprintf("Couldn't delete orphaned podcache %s: %s", fileName, err.Error()))
 			}

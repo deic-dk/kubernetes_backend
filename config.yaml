@@ -2,7 +2,7 @@ restartpolicy: "Never"
 timeoutcreate: 1m30s
 timeoutdelete: 1m30s
 namespace: sciencedata-dev
-tokendir: /tmp/tokens
+podcachedir: /tmp/podcaches
 publicip: "130.226.137.130"
 whitelistmanifestregex: https:\/\/raw[.]githubusercontent[.]com\/deic-dk\/pod_manifests
 tokenbytelimit: 4096

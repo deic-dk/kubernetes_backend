@@ -202,7 +202,7 @@ func TestDeleteAllUserPods(t *testing.T) {
 	}
 
 	// Make sure that there are no pod caches left for pods the user previously owned
-	dir, err := os.Open(s.GlobalConfig.TokenDir)
+	dir, err := os.Open(s.GlobalConfig.PodCacheDir)
 	if err != nil {
 		t.Fatalf("Couldn't open token directory: %s", err.Error())
 	}
@@ -743,7 +743,7 @@ func TestCleanAllUnused(t *testing.T) {
 	var testServices []*apiv1.Service
 	for _, name := range testPodNames {
 		// make the podcache
-		filename := fmt.Sprintf("%s/%s", s.GlobalConfig.TokenDir, name)
+		filename := fmt.Sprintf("%s/%s", s.GlobalConfig.PodCacheDir, name)
 		file, err := os.Create(filename)
 		if err != nil {
 			t.Fatalf("Couldn't create file %s, %s", filename, err.Error())
@@ -793,7 +793,7 @@ func TestCleanAllUnused(t *testing.T) {
 
 	// Check podcaches
 	for _, podName := range testPodNames {
-		filename := fmt.Sprintf("%s/%s", s.GlobalConfig.TokenDir, podName)
+		filename := fmt.Sprintf("%s/%s", s.GlobalConfig.PodCacheDir, podName)
 		_, err := os.Stat(filename)
 		if !os.IsNotExist(err) {
 			t.Fatalf("Podcache %s was not deleted", filename)
@@ -841,7 +841,7 @@ func TestCleanAllUnused(t *testing.T) {
 		podName := thisPod.Object.Name
 
 		// check podcache
-		filename := fmt.Sprintf("%s/%s", s.GlobalConfig.TokenDir, podName)
+		filename := fmt.Sprintf("%s/%s", s.GlobalConfig.PodCacheDir, podName)
 		_, err := os.Stat(filename)
 		if err != nil {
 			t.Fatalf("podcache error for testUser pod %s after cleanAllUnused %s", podName, err.Error())
@@ -978,4 +978,3 @@ func TestValidUser(t *testing.T) {
 		}
 	}
 }
-

@@ -116,7 +116,7 @@ type GlobalConfig struct {
 	TimeoutCreate          time.Duration
 	TimeoutDelete          time.Duration
 	Namespace              string
-	TokenDir               string
+	PodCacheDir            string
 	PublicIP               string
 	WhitelistManifestRegex string
 	TokenByteLimit         int

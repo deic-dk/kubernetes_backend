@@ -13,6 +13,7 @@ func main() {
 	globalConfig := util.MustLoadGlobalConfig()
 	k8sClient := k8sclient.NewK8sClient(globalConfig)
 	server := server.New(k8sClient, globalConfig)
+	server.ReloadPodCaches()
 
 	http.HandleFunc("/get_pods", server.ServeGetPods)
 	http.HandleFunc("/create_pod", server.ServeCreatePod)

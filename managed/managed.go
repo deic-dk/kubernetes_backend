@@ -312,7 +312,7 @@ func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient, globalConfig uti
 }
 
 func (p *Pod) GetCacheFilename() string {
-	return fmt.Sprintf("%s/%s", p.GlobalConfig.TokenDir, p.Object.Name)
+	return fmt.Sprintf("%s/%s", p.GlobalConfig.PodCacheDir, p.Object.Name)
 }
 
 func (p *Pod) GetPodInfo() PodInfo {
