@@ -9,15 +9,19 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"strconv"
 	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
+
+// User
 
 type User struct {
 	UserID       string
@@ -268,6 +272,10 @@ func (u *User) CreateUserStorageIfNotExist(ready *util.ReadyChannel, nfsIP strin
 	return nil
 }
 
+// Pod
+
+const ingressPortAnnotation = "sciencedata.dk/ingress-port"
+
 // Struct for data to cache for quick getPods responses
 // podTmpFiles[key] is for /tmp/key created by the pod,
 // otherResourceInfo is for data about other k8s resources related to the pod, e.g. sshport
@@ -295,6 +303,7 @@ type Pod struct {
 	Owner        User
 	Client       k8sclient.K8sClient
 	GlobalConfig util.GlobalConfig
+	ingressPort  int32
 }
 
 func NewPod(existingPod *apiv1.Pod, client k8sclient.K8sClient, globalConfig util.GlobalConfig) Pod {
@@ -359,11 +368,18 @@ func (p *Pod) NeedsSshService() bool {
 	return listensSsh
 }
 
-func (p *Pod) ListServices() (*apiv1.ServiceList, error) {
-	opt := metav1.ListOptions{
+func (p *Pod) labelSelectOptions() metav1.ListOptions {
+	return metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("createdForPod=%s", p.Object.Name),
 	}
-	return p.Client.ListServices(opt)
+}
+
+func (p *Pod) ListServices() (*apiv1.ServiceList, error) {
+	return p.Client.ListServices(p.labelSelectOptions())
+}
+
+func (p *Pod) ListIngresses() (*netv1.IngressList, error) {
+	return p.Client.ListIngresses(p.labelSelectOptions())
 }
 
 func (p *Pod) getSshPort() (string, error) {
@@ -457,7 +473,7 @@ func (p *Pod) loadPodCache() (podCache, error) {
 func (p *Pod) DeleteAllServices(finished *util.ReadyChannel) error {
 	serviceList, err := p.ListServices()
 	if err != nil {
-		return errors.New(fmt.Sprintf("Couldn't list services for pod %s", err.Error()))
+		return errors.New(fmt.Sprintf("Couldn't list services: %s", err.Error()))
 	}
 	if len(serviceList.Items) > 0 {
 		deleteChannels := make([]*util.ReadyChannel, len(serviceList.Items))
@@ -479,6 +495,20 @@ func (p *Pod) DeleteAllServices(finished *util.ReadyChannel) error {
 		util.CombineReadyChannels(deleteChannels, finished)
 	} else {
 		finished.Send(true)
+	}
+	return nil
+}
+
+func (p *Pod) DeleteAllIngresses() error {
+	ingressList, err := p.ListIngresses()
+	if err != nil {
+		return errors.New(fmt.Sprintf("Couldn't list ingresses: %s", err.Error()))
+	}
+	for _, ing := range ingressList.Items {
+		err = p.Client.DeleteIngress(ing.Name)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Failed to delete ingress: %s", err.Error()))
+		}
 	}
 	return nil
 }
@@ -507,6 +537,12 @@ func (p *Pod) RunDeleteJobsWhenReady(ready *util.ReadyChannel, finished *util.Re
 		fmt.Printf("Error deleting services: %s", err.Error())
 		finished.Send(false)
 	}
+
+	err = p.DeleteAllIngresses()
+	if err != nil {
+		fmt.Printf("Error deleting ingresses: %s", err.Error())
+		finished.Send(false)
+	}
 }
 
 // Wait until each channel in requiredToStartJobs has an input,
@@ -522,7 +558,7 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 		return
 	}
 
-	// Ensure no orphaned services for deleted pods with this pod's name
+	// Ensure no orphaned services or ingresses for deleted pods with this pod's name
 	cleanedOrphanedServices := util.NewReadyChannel(p.GlobalConfig.TimeoutDelete)
 	err := p.DeleteAllServices(cleanedOrphanedServices)
 	if err != nil {
@@ -535,20 +571,27 @@ func (p *Pod) RunStartJobsWhenReady(requiredToStartJobs []*util.ReadyChannel, fi
 		finishedStartJobs.Send(false)
 		return
 	}
+	err = p.DeleteAllIngresses()
+	if err != nil {
+		fmt.Printf("Error cleaning up orphaned ingresses %s", err.Error())
+	}
 
 	// Perform start jobs here
 
 	if p.NeedsSshService() {
 		p.startSshService()
 	}
+
+	if p.NeedsIngress() {
+		p.createIngress()
+	}
+
 	err = p.CreateAndSavePodCache(false)
 	if err != nil {
 		fmt.Printf("Failed to save pod cache for pod %s: %s\n", p.Object.Name, err.Error())
 		finishedStartJobs.Send(false)
 		return
 	}
-
-	// TODO ingress
 
 	finishedStartJobs.Send(true)
 }
@@ -631,7 +674,6 @@ func (p *Pod) GetToken(key string) (string, error) {
 
 // Start the ssh service required by this pod
 func (p *Pod) startSshService() error {
-	// TODO could add a check here to delete an orphaned service with the name that will be created here
 	targetService := p.getTargetSshService()
 	_, err := p.Client.CreateService(targetService)
 	if err != nil {
@@ -659,9 +701,123 @@ func (p *Pod) getTargetSshService() *apiv1.Service {
 					TargetPort: intstr.FromInt(22),
 				},
 			},
-			Type:        apiv1.ServiceTypeLoadBalancer,
-			Selector:    p.Object.ObjectMeta.Labels,
-			ExternalIPs: []string{p.GlobalConfig.PublicIP},
+			Type:     apiv1.ServiceTypeNodePort,
+			Selector: p.Object.ObjectMeta.Labels,
 		},
 	}
+}
+
+// Checks whether an ingress should be created for this pod based on the annotation in its manifest
+func (p *Pod) NeedsIngress() bool {
+	portStr, hasKey := p.Object.ObjectMeta.Annotations[ingressPortAnnotation]
+	if hasKey {
+		portInt, err := strconv.ParseInt(portStr, 10, 32)
+		if err != nil {
+			fmt.Printf("Warning: Couldn't parse ingress-port annotation for pod %s, skipping ingress", p.Object.Name)
+			return false
+		}
+		p.ingressPort = int32(portInt)
+	}
+	return hasKey
+}
+
+func (p *Pod) createIngress() error {
+	// First create the service that the ingress should route to
+	targetService := p.getTargetHttpService()
+	_, err := p.Client.CreateService(targetService)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Created SVC %s\n", targetService.Name)
+
+	// Then create the ingress
+	targetIngress := p.getTargetIngress()
+	_, err = p.Client.CreateIngress(targetIngress)
+	if err != nil {
+		fmt.Printf("Ingress error: %s\n", err.Error())
+		return err
+	}
+	fmt.Printf("Created ING %s\n", targetIngress.Name)
+
+	return nil
+}
+
+// Get a target service object that will forward http traffic to this pod
+// An ingress will route traffic to it
+func (p *Pod) getTargetHttpService() *apiv1.Service {
+	return &apiv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-http", p.Object.Name),
+			Labels: map[string]string{
+				"createdForPod": p.Object.Name,
+			},
+		},
+		Spec: apiv1.ServiceSpec{
+			Ports: []apiv1.ServicePort{
+				{
+					Name:       "http",
+					Protocol:   apiv1.ProtocolTCP,
+					Port:       p.ingressPort,
+					TargetPort: intstr.FromInt(int(p.ingressPort)),
+				},
+			},
+			Type:     apiv1.ServiceTypeClusterIP,
+			Selector: p.Object.ObjectMeta.Labels,
+		},
+	}
+}
+
+// Get a target ingress object to route http traffic to this pod
+func (p *Pod) getTargetIngress() *netv1.Ingress {
+	pathType := netv1.PathTypePrefix
+	return &netv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-ingress", p.Object.Name),
+			Labels: map[string]string{
+				"createdForPod": p.Object.Name,
+			},
+			Annotations: map[string]string{
+				"cert-manager.io/cluster-issuer": p.GlobalConfig.IngressIssuer,
+			},
+		},
+		Spec: netv1.IngressSpec{
+			TLS: []netv1.IngressTLS{
+				{
+					Hosts:      []string{p.GlobalConfig.IngressURL},
+					SecretName: fmt.Sprintf("tls-%s", p.GlobalConfig.IngressURL),
+				},
+			},
+			Rules: []netv1.IngressRule{
+				{
+					Host: p.GlobalConfig.IngressURL,
+					IngressRuleValue: netv1.IngressRuleValue{
+						HTTP: &netv1.HTTPIngressRuleValue{
+							Paths: []netv1.HTTPIngressPath{
+								{
+									Path:     p.getIngressPath(),
+									PathType: &pathType,
+									Backend: netv1.IngressBackend{
+										Service: &netv1.IngressServiceBackend{
+											Name: fmt.Sprintf("%s-http", p.Object.Name),
+											Port: netv1.ServiceBackendPort{
+												Number: p.ingressPort,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// Function for deriving the part of the url that follows the domain.
+// For now, we can just use the pod name since it is url-compatible,
+// unique, and specific to the user, but we could decide to define
+// it differently
+func (p *Pod) getIngressPath() string {
+	return fmt.Sprintf("/%s", p.Object.Name)
 }

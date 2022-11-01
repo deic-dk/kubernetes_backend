@@ -35,6 +35,14 @@ rules:
       - pods/exec
     verbs:
       - create
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs:
+      - create
+      - delete
+      - list
+      - get
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -100,6 +108,12 @@ spec:
           value: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n"
         - name: "BACKEND_PUBLICIP"
           value: "130.226.137.135"
+        - name: "BACKEND_LOCALREGISTRYURL"
+          value: "dockerregistry.clement.tel"
+        - name: "BACKEND_LOCALREGISTRYSECRET"
+          value: "docker-registry-auth"
+        - name: "BACKEND_INGRESSURL"
+          value: "testk8s.clement.tel"
       ports:
         - containerPort: 22
           protocol: TCP

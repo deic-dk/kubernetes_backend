@@ -9,6 +9,7 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	netv1 "k8s.io/api/networking/v1"
 	watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -209,6 +210,18 @@ func (c *K8sClient) DeleteService(name string) error {
 
 func (c *K8sClient) WatchDeleteService(name string, finished *util.ReadyChannel) {
 	c.WatchFor(name, "SVC", signalDeleted, finished)
+}
+
+func (c *K8sClient) ListIngresses(opt metav1.ListOptions) (*netv1.IngressList, error) {
+	return c.clientset.NetworkingV1().Ingresses(c.globalConfig.Namespace).List(context.TODO(), opt)
+}
+
+func (c *K8sClient) CreateIngress(target *netv1.Ingress) (*netv1.Ingress, error) {
+	return c.clientset.NetworkingV1().Ingresses(c.globalConfig.Namespace).Create(context.TODO(), target, metav1.CreateOptions{})
+}
+
+func (c *K8sClient) DeleteIngress(name string) error {
+	return c.clientset.NetworkingV1().Ingresses(c.globalConfig.Namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
 // call a bash command inside of a pod, with the command given as a []string of bash words
