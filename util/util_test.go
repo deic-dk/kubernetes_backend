@@ -1,6 +1,9 @@
 package util
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,4 +53,39 @@ func TestGetUserIDFromLabels(t *testing.T) {
 			t.Fatalf("Failed to get userID for %v", test.input)
 		}
 	}
+}
+
+func TestLoadConfig(t *testing.T) {
+	// Load the config as it currently is
+	configOriginal := MustLoadGlobalConfig()
+
+	// Get current environment variables to be able to reset them later
+	varNamespace := fmt.Sprintf("%s_%s", strings.ToUpper(environmentPrefix), "NAMESPACE")
+	varTimeoutDelete := fmt.Sprintf("%s_%s", strings.ToUpper(environmentPrefix), "TIMEOUTDELETE")
+	currentNamespace := os.Getenv(varNamespace)
+	currentTimeoutDelete := os.Getenv(varTimeoutDelete)
+
+	// Overwrite the environment variables
+	newNamespace := "foobar"
+	newTimeoutDelete := "5m3s"
+	os.Setenv(varNamespace, newNamespace)
+	os.Setenv(varTimeoutDelete, newTimeoutDelete)
+
+	// Load the config which should include the overwritten values
+	configOverwritten := MustLoadGlobalConfig()
+	if (configOverwritten.TimeoutDelete == configOriginal.TimeoutDelete) && (configOverwritten.Namespace == configOriginal.Namespace) && (newNamespace != currentNamespace) && (newTimeoutDelete != currentTimeoutDelete) {
+		t.Fatal("Overwritten environment variables didn't affect the loaded config")
+	}
+
+	if configOverwritten.TimeoutDelete.String() != newTimeoutDelete {
+		t.Fatal("Didn't set timeout correctly from environment variable")
+	}
+
+	if configOverwritten.Namespace != newNamespace {
+		t.Fatal("Didn't set namespace correctly from environment variable")
+	}
+
+	// Set environment variables back to their previous value
+	os.Setenv(varNamespace, currentNamespace)
+	os.Setenv(varTimeoutDelete, currentTimeoutDelete)
 }

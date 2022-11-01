@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,6 +123,8 @@ type GlobalConfig struct {
 	NfsStorageRoot         string
 	MandatoryEnvVars       map[string]string
 	TestingHost            string
+	LocalRegistryURL       string
+	LocalRegistrySecret    string
 }
 
 func SaveGlobalConfig(c GlobalConfig) error {
@@ -143,7 +146,15 @@ func MustLoadGlobalConfig() GlobalConfig {
 	// Load the configuration
 
 	// Check values from the config file
-	viper.SetConfigFile(configFilename)
+	// Add this dir and parent dir to search for the config file
+	// in case the working directory is in the project root or in
+	// one of the source folders to call `go test`
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("..")
+	// Set the config file name (without extension)
+	viper.SetConfigName(strings.Split(configFilename, ".")[0])
+	// Set the config file type (extension)
+	viper.SetConfigType(strings.Split(configFilename, ".")[1])
 	err := viper.ReadInConfig()
 	if err != nil {
 		panic(err.Error())
@@ -157,7 +168,6 @@ func MustLoadGlobalConfig() GlobalConfig {
 	if err != nil {
 		panic(err.Error())
 	}
-	fmt.Printf("%+v", config)
 
 	// Validate the loaded configuration
 

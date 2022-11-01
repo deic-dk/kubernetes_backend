@@ -37,7 +37,6 @@ func checkEnvironmentVars(pod v1.Pod, request testingutil.CreatePodRequest, mand
 		}
 		if !hasContainer {
 			return errors.New(fmt.Sprintf("Pod %s doesn't have container %s, should be faulty input in the request containerEnvVars", pod.Name, containerName))
-			continue
 		}
 		for key, value := range envVars {
 			hasKey := false
@@ -168,5 +167,39 @@ func TestPodCreation(t *testing.T) {
 				t.Fatalf("requiresUserStorage returns %t when storageRequired is %t", pc.requiresUserStorage(), storageRequired)
 			}
 		}
+	}
+}
+
+func TestRegistrySettings(t *testing.T) {
+	// Initialize a default podCreator
+
+	u := newUser(testingutil.TestUser)
+	u.GlobalConfig.LocalRegistrySecret = "testingregistrysecret"
+	u.GlobalConfig.LocalRegistryURL = "testingregistryurl"
+	defaultRequests := testingutil.GetStandardPodRequests()
+	// take the first of the default requests
+	var request testingutil.CreatePodRequest
+	for _, r := range defaultRequests {
+		request = r
+		break
+	}
+	pc, err := NewPodCreator(request.YamlURL, u.UserID, testingutil.RemoteIP, request.Settings, u.Client, u.GlobalConfig)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// Reinitialize the registry settings of the podCreator's targetPod
+	// Set imagePullSecrets to an empty list
+	pc.targetPod.Spec.ImagePullSecrets = []v1.LocalObjectReference{}
+	// Name the image for the first container to come from a local registry
+	pc.targetPod.Spec.Containers[0].Image = "LOCALREGISTRY/foobar"
+
+	// Now see whether applyRegistrySettings behaves correctly
+	pc.applyRegistrySettings()
+  if pc.targetPod.Spec.ImagePullSecrets[0].Name != "testingregistrysecret" {
+		t.Fatalf("applyRegistrySettings didn't successfully add the secret.")
+	}
+  if pc.targetPod.Spec.Containers[0].Image != "testingregistryurl/foobar" {
+		t.Fatalf("applyRegistrySettings didn't successfully rewrite the registry url.")
 	}
 }

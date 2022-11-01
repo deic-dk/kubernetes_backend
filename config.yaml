@@ -8,3 +8,5 @@ whitelistmanifestregex: https:\/\/raw[.]githubusercontent[.]com\/deic-dk\/pod_ma
 tokenbytelimit: 4096
 nfsstorageroot: "/tank/storage"
 testinghost: "10.0.0.20"
+localregistryurl: ""
+localregistrysecret: ""

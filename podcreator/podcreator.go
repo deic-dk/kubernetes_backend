@@ -76,6 +76,7 @@ func (pc *PodCreator) initTargetPod() error {
 		return errors.New("PodCreator already initialized with a targetPod")
 	}
 	var targetPod apiv1.Pod
+	pc.targetPod = &targetPod
 
 	// Get the manifest
 	yaml, err := pc.getYaml()
@@ -94,26 +95,27 @@ func (pc *PodCreator) initTargetPod() error {
 		return errors.New(fmt.Sprintf("Couldn't convert runtime.Object: %s", err.Error()))
 	}
 	// Fill out targetPodObject with the data from the manifest
-	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPod, &targetPod)
+	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPod, pc.targetPod)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't parse manifest as apiv1.Pod: %s", err.Error()))
 	}
 
 	// Fill in values in targetPodObject according to the request
-	pc.applyCreatePodSettings(&targetPod)
+	pc.applyCreatePodSettings()
 	// Fill in values in targetPodObject that are independent of the request
-	pc.applyMandatorySettings(&targetPod)
+	pc.applyMandatorySettings()
+	// Fill in the correct settings to pull the image from a local repository if necessary
+	pc.applyRegistrySettings()
 	// Find and set a unique podName in the format pod.metadata.name-user-domain-x
-	err = pc.applyCreatePodName(&targetPod)
+	err = pc.applyCreatePodName()
 	if err != nil {
 		return err
 	}
-	err = pc.applyCreatePodVolumes(&targetPod)
+	err = pc.applyCreatePodVolumes()
 	if err != nil {
 		return err
 	}
 
-	pc.targetPod = &targetPod
 	return nil
 }
 
@@ -146,24 +148,24 @@ func (pc *PodCreator) getYaml() (string, error) {
 }
 
 // Apply all settings that are mandatory for each pod, independent of the request or manifest
-func (pc *PodCreator) applyMandatorySettings(targetPodObject *apiv1.Pod) {
+func (pc *PodCreator) applyMandatorySettings() {
 	// Set the restart policy from the global config
-	targetPodObject.Spec.RestartPolicy = pc.globalConfig.RestartPolicy
+	pc.targetPod.Spec.RestartPolicy = pc.globalConfig.RestartPolicy
 
 	// Set environment variables in each container
-	for i, _ := range targetPodObject.Spec.Containers {
+	for i, _ := range pc.targetPod.Spec.Containers {
 		for name, value := range pc.getMandatoryEnvVars() {
 			overwrite := false
 			// try to overwrite the value if the var already exists
-			for ii, env := range targetPodObject.Spec.Containers[i].Env {
+			for ii, env := range pc.targetPod.Spec.Containers[i].Env {
 				if env.Name == name {
-					targetPodObject.Spec.Containers[i].Env[ii].Value = value
+					pc.targetPod.Spec.Containers[i].Env[ii].Value = value
 					overwrite = true
 				}
 			}
 			// otherwise, append the var
 			if !overwrite {
-				targetPodObject.Spec.Containers[i].Env = append(targetPodObject.Spec.Containers[i].Env, apiv1.EnvVar{
+				pc.targetPod.Spec.Containers[i].Env = append(pc.targetPod.Spec.Containers[i].Env, apiv1.EnvVar{
 					Name:  name,
 					Value: value,
 				})
@@ -172,8 +174,8 @@ func (pc *PodCreator) applyMandatorySettings(targetPodObject *apiv1.Pod) {
 	}
 }
 
-func (pc *PodCreator) applyCreatePodSettings(targetPodObject *apiv1.Pod) {
-	for i, container := range targetPodObject.Spec.Containers {
+func (pc *PodCreator) applyCreatePodSettings() {
+	for i, container := range pc.targetPod.Spec.Containers {
 		envVars, exist := pc.containerEnvVars[container.Name]
 		// if there are settings for this container (if container.Name is a key in request.ContainerEnvVars)
 		if exist {
@@ -182,7 +184,7 @@ func (pc *PodCreator) applyCreatePodSettings(targetPodObject *apiv1.Pod) {
 				// find the env entry with a matching name, and set the value
 				for ii, env := range container.Env {
 					if env.Name == name {
-						targetPodObject.Spec.Containers[i].Env[ii].Value = value
+						pc.targetPod.Spec.Containers[i].Env[ii].Value = value
 					}
 				}
 			}
@@ -190,8 +192,27 @@ func (pc *PodCreator) applyCreatePodSettings(targetPodObject *apiv1.Pod) {
 	}
 }
 
-func (pc *PodCreator) applyCreatePodName(targetPodObject *apiv1.Pod) error {
-	basePodName := fmt.Sprintf("%s-%s", targetPodObject.Name, pc.user.GetUserString())
+// If any containers in the pod manifest get their image from a local repository,
+// then write in the URL where the image should be pulled from with the value in the config.
+// If the config specifies the name of a secret with auth credentials to pull from the
+// local repository, then fill it in the pod spec.
+func (pc *PodCreator) applyRegistrySettings() {
+	requires_local_registry := false
+	for ii, container := range pc.targetPod.Spec.Containers {
+		if strings.Contains(container.Image, "LOCALREGISTRY") {
+			requires_local_registry = true
+			pc.targetPod.Spec.Containers[ii].Image = strings.Replace(container.Image, "LOCALREGISTRY", pc.globalConfig.LocalRegistryURL, 1)
+		}
+	}
+	if requires_local_registry && len(pc.globalConfig.LocalRegistrySecret) > 0 {
+		pc.targetPod.Spec.ImagePullSecrets = []apiv1.LocalObjectReference{
+			{Name: pc.globalConfig.LocalRegistrySecret},
+		}
+	}
+}
+
+func (pc *PodCreator) applyCreatePodName() error {
+	basePodName := fmt.Sprintf("%s-%s", pc.targetPod.Name, pc.user.GetUserString())
 	existingPodList, err := pc.user.ListPods()
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list pods to find a unique pod name: %s", err.Error()))
@@ -209,8 +230,8 @@ func (pc *PodCreator) applyCreatePodName(targetPodObject *apiv1.Pod) error {
 		// if a pod with the name podName doesn't exist yet
 		if !nameInUse {
 			// then set the target pod's name and labels, then finish
-			targetPodObject.Name = podName
-			targetPodObject.ObjectMeta.Labels = map[string]string{
+			pc.targetPod.Name = podName
+			pc.targetPod.ObjectMeta.Labels = map[string]string{
 				"user":    pc.user.Name,
 				"domain":  pc.user.Domain,
 				"podName": podName,
@@ -255,12 +276,12 @@ func (pc *PodCreator) getCreatePodSpecVolume(volumeMount apiv1.VolumeMount) (api
 // Make sure that any VolumeMounts that aren't specified in Spec.Volumes get added.
 // This should be used for e.g. the user's storage, which should be generated at runtime
 // for the given user.
-func (pc *PodCreator) applyCreatePodVolumes(targetPodObject *apiv1.Pod) error {
-	for _, container := range targetPodObject.Spec.Containers {
+func (pc *PodCreator) applyCreatePodVolumes() error {
+	for _, container := range pc.targetPod.Spec.Containers {
 		for _, volumeMount := range container.VolumeMounts {
 			// For each volume mount, first check whether the volume is specified in pod.Spec.Volumes
 			satisfied := false
-			for _, volume := range targetPodObject.Spec.Volumes {
+			for _, volume := range pc.targetPod.Spec.Volumes {
 				if volume.Name == volumeMount.Name {
 					satisfied = true
 					break
@@ -271,7 +292,7 @@ func (pc *PodCreator) applyCreatePodVolumes(targetPodObject *apiv1.Pod) error {
 				if err != nil {
 					return err
 				}
-				targetPodObject.Spec.Volumes = append(targetPodObject.Spec.Volumes, targetVolumeSpec)
+				pc.targetPod.Spec.Volumes = append(pc.targetPod.Spec.Volumes, targetVolumeSpec)
 			}
 		}
 	}
