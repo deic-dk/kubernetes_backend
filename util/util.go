@@ -125,8 +125,9 @@ type GlobalConfig struct {
 	TestingHost            string
 	LocalRegistryURL       string
 	LocalRegistrySecret    string
-	IngressURL             string
+	IngressDomain          string
 	IngressIssuer          string
+	IngressWildcardSecret  string
 }
 
 func SaveGlobalConfig(c GlobalConfig) error {

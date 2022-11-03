@@ -777,24 +777,24 @@ func (p *Pod) getTargetIngress() *netv1.Ingress {
 				"createdForPod": p.Object.Name,
 			},
 			Annotations: map[string]string{
-				"cert-manager.io/cluster-issuer": p.GlobalConfig.IngressIssuer,
+				"cert-manager.io/issuer": p.GlobalConfig.IngressIssuer,
 			},
 		},
 		Spec: netv1.IngressSpec{
 			TLS: []netv1.IngressTLS{
 				{
-					Hosts:      []string{p.GlobalConfig.IngressURL},
-					SecretName: fmt.Sprintf("tls-%s", p.GlobalConfig.IngressURL),
+					Hosts:      []string{p.getIngressURL()},
+					SecretName: p.GlobalConfig.IngressWildcardSecret,
 				},
 			},
 			Rules: []netv1.IngressRule{
 				{
-					Host: p.GlobalConfig.IngressURL,
+					Host: p.getIngressURL(),
 					IngressRuleValue: netv1.IngressRuleValue{
 						HTTP: &netv1.HTTPIngressRuleValue{
 							Paths: []netv1.HTTPIngressPath{
 								{
-									Path:     p.getIngressPath(),
+									Path: "/",
 									PathType: &pathType,
 									Backend: netv1.IngressBackend{
 										Service: &netv1.IngressServiceBackend{
@@ -814,10 +814,10 @@ func (p *Pod) getTargetIngress() *netv1.Ingress {
 	}
 }
 
-// Function for deriving the part of the url that follows the domain.
+// Function for deriving the URL for routing traffic to the pod.
 // For now, we can just use the pod name since it is url-compatible,
 // unique, and specific to the user, but we could decide to define
 // it differently
-func (p *Pod) getIngressPath() string {
-	return fmt.Sprintf("/%s", p.Object.Name)
+func (p *Pod) getIngressURL() string {
+	return fmt.Sprintf("%s.%s", p.Object.Name, p.GlobalConfig.IngressDomain)
 }
