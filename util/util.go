@@ -112,12 +112,11 @@ func GetUserIDFromLabels(labels map[string]string) string {
 }
 
 type GlobalConfig struct {
-	RestartPolicy          apiv1.RestartPolicy
+	DefaultRestartPolicy   apiv1.RestartPolicy
 	TimeoutCreate          time.Duration
 	TimeoutDelete          time.Duration
 	Namespace              string
 	PodCacheDir            string
-	PublicIP               string
 	WhitelistManifestRegex string
 	TokenByteLimit         int
 	NfsStorageRoot         string
@@ -181,7 +180,7 @@ func MustLoadGlobalConfig() GlobalConfig {
 	}
 
 	// Check that RestartPolicy is an allowed value
-	switch config.RestartPolicy {
+	switch config.DefaultRestartPolicy {
 	case apiv1.RestartPolicyAlways:
 	case apiv1.RestartPolicyOnFailure:
 	case apiv1.RestartPolicyNever:
@@ -190,10 +189,7 @@ func MustLoadGlobalConfig() GlobalConfig {
 		panic(fmt.Sprintf("Invalid restart policy. Must be \"Always\", \"OnFailure\", \"Never\", or empty"))
 	}
 
-	// Check that PublicIP and TestingHost are IP addresses
-	if addr := net.ParseIP(config.PublicIP); addr == nil {
-		panic(fmt.Sprintf("Public IP %s not a valid ip address", config.PublicIP))
-	}
+	// Check that TestingHost is an IP address
 	if addr := net.ParseIP(config.TestingHost); addr == nil {
 		panic(fmt.Sprintf("TestingHost %s not a valid ip address", config.TestingHost))
 	}

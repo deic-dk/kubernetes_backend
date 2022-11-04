@@ -149,8 +149,10 @@ func (pc *PodCreator) getYaml() (string, error) {
 
 // Apply all settings that are mandatory for each pod, independent of the request or manifest
 func (pc *PodCreator) applyMandatorySettings() {
-	// Set the restart policy from the global config
-	pc.targetPod.Spec.RestartPolicy = pc.globalConfig.RestartPolicy
+	// Set the restart policy from the global config if not already set
+	if pc.targetPod.Spec.RestartPolicy == "" {
+		pc.targetPod.Spec.RestartPolicy = pc.globalConfig.DefaultRestartPolicy
+	}
 
 	// Set environment variables in each container
 	for i, _ := range pc.targetPod.Spec.Containers {

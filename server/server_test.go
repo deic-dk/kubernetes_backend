@@ -68,7 +68,7 @@ func userPVOrPVCExist(u managed.User) (bool, error) {
 	return false, nil
 }
 
-func exampleSshService(podName string, publicIP string) *apiv1.Service {
+func exampleSshService(podName string) *apiv1.Service {
 	return &apiv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s-ssh", podName),
@@ -85,8 +85,7 @@ func exampleSshService(podName string, publicIP string) *apiv1.Service {
 					TargetPort: intstr.FromInt(22),
 				},
 			},
-			Type:        apiv1.ServiceTypeLoadBalancer,
-			ExternalIPs: []string{publicIP},
+			Type: apiv1.ServiceTypeNodePort,
 		},
 	}
 }
@@ -753,7 +752,7 @@ func TestCleanAllUnused(t *testing.T) {
 			t.Fatalf("Couldn't close file %s, %s", filename, err.Error())
 		}
 		// make the service
-		service := exampleSshService(name, s.GlobalConfig.PublicIP)
+		service := exampleSshService(name)
 		testServices = append(testServices, service)
 		_, err = s.Client.CreateService(service)
 		if err != nil {

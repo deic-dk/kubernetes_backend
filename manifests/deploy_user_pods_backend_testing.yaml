@@ -102,7 +102,7 @@ spec:
     - name: docker-registry-auth
   containers:
     - name: user-pods-backend-testing
-      image: dockerregistry.clement.tel/kubernetes_backend
+      image: dockerregistry.clement.tel/user_pods_backend_testing
       env:
         - name: "SSH_PUBLIC_KEY"
           value: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n"
@@ -112,8 +112,8 @@ spec:
           value: "dockerregistry.clement.tel"
         - name: "BACKEND_LOCALREGISTRYSECRET"
           value: "docker-registry-auth"
-        - name: "BACKEND_INGRESSURL"
-          value: "testk8s.clement.tel"
+        - name: "BACKEND_INGRESSDOMAIN"
+          value: "pods.clement.tel"
       ports:
         - containerPort: 22
           protocol: TCP
