@@ -3,6 +3,8 @@ package managed
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -116,6 +118,13 @@ func TestListOptions(t *testing.T) {
 
 func TestListPods(t *testing.T) {
 	u := newUser(testUser)
+
+	// Make sure the user has some pods
+	err := testingutil.EnsureUserHasNPods(u.Name, 3, u.GlobalConfig)
+	if err != nil {
+		t.Fatalf("Couldn't create pods for user: %s", err.Error())
+	}
+
 	// Use u.ListPods
 	podList, err := u.ListPods()
 	if err != nil {
@@ -145,6 +154,13 @@ func TestListPods(t *testing.T) {
 
 func TestOwnership(t *testing.T) {
 	u := newUser(testUser)
+
+	// Make sure the user has some pods
+	err := testingutil.EnsureUserHasNPods(u.Name, 3, u.GlobalConfig)
+	if err != nil {
+		t.Fatalf("Couldn't create pods for user: %s", err.Error())
+	}
+
 	// Use u.ListPods
 	podList, err := u.ListPods()
 	if err != nil {
@@ -194,9 +210,9 @@ func TestUserString(t *testing.T) {
 }
 
 func TestCreateDeleteUserStorage(t *testing.T) {
-	// It should return without error and receive true for a user whose storage doesn't exist
 	u := newUser("foo@bar.baz")
 	finished := util.NewReadyChannel(time.Second)
+	// It should return without error and receive true for a user whose storage doesn't exist
 	err := u.DeleteUserStorage(finished)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -310,7 +326,7 @@ func TestPodData(t *testing.T) {
 	}
 
 	for _, pod := range podList {
-		// check that NeedsSshService is correct
+		// check that NeedsSshService and NeedsIngress are correct
 		podType := ""
 		for key := range defaultRequests {
 			if strings.Contains(pod.Object.Name, key) {
@@ -322,6 +338,9 @@ func TestPodData(t *testing.T) {
 		if podType != "" {
 			if pod.NeedsSshService() != defaultRequests[podType].Supplementary.NeedsSsh {
 				t.Fatalf("Pod %s NeedsSshService() returns %t but should be %t", pod.Object.Name, pod.NeedsSshService(), defaultRequests[podType].Supplementary.NeedsSsh)
+			}
+			if pod.NeedsIngress() != defaultRequests[podType].Supplementary.NeedsIngress {
+				t.Fatalf("Pod %s NeedsIngress() returns %t but should be %t", pod.Object.Name, pod.NeedsIngress(), defaultRequests[podType].Supplementary.NeedsIngress)
 			}
 		}
 
@@ -402,5 +421,72 @@ func TestJobs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestIngress(t *testing.T) {
+	// Ensure user pods are deleted first
+	u := newUser(testingutil.TestUser)
+	err := testingutil.DeleteAllUserPods(u.Name)
+	if err != nil {
+		t.Fatalf("Error deleting user pods: %s", err.Error())
+	}
+
+	testingRequests := testingutil.GetTestingPodRequests()
+	podName, err := testingutil.CreatePod(testingRequests["http_hello_world"])
+	if err != nil {
+		t.Fatalf("Couldn't create testing pod: %s", err.Error())
+	}
+
+	finished := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
+	err = testingutil.WatchCreatePod(u.Name, podName, finished)
+	if err != nil {
+		t.Fatalf("Couldn't watch creation of testing pod: %s", err.Error())
+	}
+	if !finished.Receive() {
+		t.Fatalf("Testing pod didn't reach ready state")
+	}
+
+	pods, err := u.ListPods()
+	if err != nil {
+		t.Fatalf("Couldn't list pods: %s", err.Error())
+	}
+	if len(pods) != 1 {
+		t.Fatalf("The user should have exactly one pod but has %d", len(pods))
+	}
+	testPod := pods[0]
+	t.Logf("Successfully created testing pod, attempting to cURL")
+
+	// Try a few times to make the http request
+	var failed error = nil
+	for i := 0; i < 10; i++ {
+		response, err := http.Get(fmt.Sprintf("https://%s", testPod.getIngressHost()))
+		if err != nil {
+			t.Fatalf("Error making http get request %s", err.Error())
+		}
+		defer response.Body.Close()
+		// This can get a 404 while the testing container's starting script is running
+		if response.StatusCode == 200 {
+			failed = nil
+		} else {
+			failed = errors.New(fmt.Sprintf("Http request to testing pod got response code %d", response.StatusCode))
+			t.Logf("Failed %d time(s), waiting a second to try again", i + 1)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		body, err := ioutil.ReadAll(response.Body)
+		hello := string(body)
+		if !strings.Contains(hello, "http hello world") {
+			t.Fatalf("Didn't get expected response \"http hello world\", instead got %s", hello)
+		}
+	}
+	if failed != nil {
+		t.Fatal(failed)
+	}
+
+	// Clean up by deleting the testing pod
+	_, err = testingutil.DeletePod(u.Name, podName)
+	if err != nil {
+		t.Fatalf("Couldn't delete testing pod: %s", err.Error())
 	}
 }

@@ -20,7 +20,8 @@ const (
 )
 
 type SupplementaryPodInfo struct {
-	NeedsSsh bool
+	NeedsSsh     bool
+	NeedsIngress bool
 }
 
 type CreatePodRequest struct {
@@ -209,7 +210,7 @@ func GetStandardPodRequests() map[string]CreatePodRequest {
 		Settings: map[string]map[string]string{
 			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
 		},
-		Supplementary: SupplementaryPodInfo{NeedsSsh: false},
+		Supplementary: SupplementaryPodInfo{NeedsSsh: false, NeedsIngress: true},
 	}
 	response["ubuntu"] = CreatePodRequest{
 		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml",
@@ -217,11 +218,28 @@ func GetStandardPodRequests() map[string]CreatePodRequest {
 		Settings: map[string]map[string]string{
 			"ubuntu-jammy": {"SSH_PUBLIC_KEY": TestSshKey},
 		},
-		Supplementary: SupplementaryPodInfo{NeedsSsh: true},
+		Supplementary: SupplementaryPodInfo{NeedsSsh: true, NeedsIngress: false},
 	}
 	return response
 }
 
+// Get a map of all pod types useful for testing to their CreatePodRequests
+func GetTestingPodRequests() map[string]CreatePodRequest {
+	response := make(map[string]CreatePodRequest)
+	response["test_long_key"] = CreatePodRequest{
+		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/test_long_key.yaml",
+		UserID:  TestUser,
+		Supplementary: SupplementaryPodInfo{NeedsSsh: false, NeedsIngress: false},
+	}
+	response["http_hello_world"] = CreatePodRequest{
+		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/http_hello_world.yaml",
+		UserID:  TestUser,
+		Supplementary: SupplementaryPodInfo{NeedsSsh: false, NeedsIngress: true},
+	}
+	return response
+}
+
+// Get a list of podNames owned by the user from a get_pods request
 func GetPodNames(userID string) ([]string, error) {
 	var podNames []string
 	request := getPodNamesRequest{UserID: userID}

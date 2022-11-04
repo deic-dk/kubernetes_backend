@@ -218,68 +218,6 @@ func TestDeleteAllUserPods(t *testing.T) {
 	t.Logf("All user pods were deleted, there are no pod caches matching the username, and the PV and PVC were deleted")
 }
 
-func TestCreateJupyter(t *testing.T) {
-	fileEnvVar := "testValue42"
-	s := newServer()
-	request := CreatePodRequest{
-		YamlURL:  "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
-		UserID:   testingutil.TestUser,
-		RemoteIP: testingutil.RemoteIP,
-		ContainerEnvVars: map[string]map[string]string{
-			"jupyter": {"FILE": fileEnvVar, "WORKING_DIRECTORY": "jupyter"},
-		},
-	}
-
-	// Check that the pod cache doesn't exist yet
-	_, err := os.Stat("/tmp/tokens/jupyter-registeredtest7")
-	if err == nil {
-		t.Fatal("jupyter pod cache existed before creating the pod")
-	}
-
-	t.Logf("Attempting to create a new jupyter pod")
-
-	// Start the pod
-	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
-	response, err := s.createPod(request, finished)
-	if err != nil {
-		t.Fatalf("Couldn't call for pod creation %s", err.Error())
-	}
-	// Make sure the pod started and start jobs ran successfully
-	if !finished.Receive() {
-		t.Fatal("Pod didn't reach ready state with completed start jobs")
-	}
-
-	// Make sure that the test user has this pod and no others
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
-	podList, err := u.ListPods()
-	if err != nil {
-		t.Fatalf("Couldn't list pods: %s", err.Error())
-	}
-	if len(podList) != 1 {
-		t.Fatalf("%d pods exist for the test user, where there should only be the one created", len(podList))
-	}
-	if podList[0].Object.Name != response.PodName {
-		t.Fatal("The created pod has a different name than what was returned")
-	}
-
-	t.Logf("Checking the pod's cache and environment variables")
-	// Check that the environment variables were set correctly in the pod
-	stdout, stderr, err := echoEnvVarInPod(podList[0], "$FILE")
-	if err != nil {
-		t.Fatalf("Couldn't test environment variable in jupyter pod:\nstderr: %s\nerror: %s", stderr, err.Error())
-	}
-	// (Note that there may be some kind of EOF character at the end of the stdout buffer)
-	if fileEnvVar != strings.TrimSpace(stdout) {
-		t.Fatalf("Didn't get correct environment variable in Jupyter pod. Expected %s, got %s", fileEnvVar, stdout)
-	}
-
-	// Check that the pod cache exists now
-	_, err = os.Stat("/tmp/tokens/jupyter-registeredtest7")
-	if err != nil {
-		t.Fatal("Jupyter pod cache wasn't saved")
-	}
-}
-
 func TestStandardPodCreation(t *testing.T) {
 	s := newServer()
 	// Double check that the user doesn't have any pods
@@ -322,7 +260,8 @@ func TestStandardPodCreation(t *testing.T) {
 			}
 
 			// There should be an entry in CreatingPods until this finishes
-			// Check by making a channel for a select statement
+			// Check by making a channel to receive from finished.Receive() for the select statement
+			// so that if finished.Receive() returns before the select statement is reached, the default won't run.
 			ch := make(chan bool, 1)
 			go func() { ch <- finished.Receive() }()
 			select {

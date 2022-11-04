@@ -345,13 +345,16 @@ func (p *Pod) GetPodInfo() PodInfo {
 	podInfo.PodName = p.Object.Name
 	podInfo.Status = fmt.Sprintf("%s:%s", p.Object.Status.Phase, startTimeStr)
 
+	if p.NeedsIngress() {
+		podInfo.Url = fmt.Sprintf("https://%s", p.getIngressHost())
+	}
+
 	cache, err := p.loadPodCache()
 	if err == nil {
 		podInfo.Tokens = cache.Tokens
 		podInfo.OtherResourceInfo = cache.OtherResourceInfo
 	}
 
-	// TODO get url from ingress
 	return podInfo
 }
 
@@ -783,13 +786,13 @@ func (p *Pod) getTargetIngress() *netv1.Ingress {
 		Spec: netv1.IngressSpec{
 			TLS: []netv1.IngressTLS{
 				{
-					Hosts:      []string{p.getIngressURL()},
+					Hosts:      []string{p.getIngressHost()},
 					SecretName: p.GlobalConfig.IngressWildcardSecret,
 				},
 			},
 			Rules: []netv1.IngressRule{
 				{
-					Host: p.getIngressURL(),
+					Host: p.getIngressHost(),
 					IngressRuleValue: netv1.IngressRuleValue{
 						HTTP: &netv1.HTTPIngressRuleValue{
 							Paths: []netv1.HTTPIngressPath{
@@ -818,6 +821,6 @@ func (p *Pod) getTargetIngress() *netv1.Ingress {
 // For now, we can just use the pod name since it is url-compatible,
 // unique, and specific to the user, but we could decide to define
 // it differently
-func (p *Pod) getIngressURL() string {
+func (p *Pod) getIngressHost() string {
 	return fmt.Sprintf("%s.%s", p.Object.Name, p.GlobalConfig.IngressDomain)
 }

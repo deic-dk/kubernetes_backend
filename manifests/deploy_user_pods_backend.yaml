@@ -2,14 +2,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: user-pods-backend
-  namespace: sciencedata-dev
+  namespace: sciencedata
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: modify-sciencedata
-  namespace: sciencedata-dev
+  namespace: sciencedata
 rules:
   - apiGroups: [""]
     resources:
@@ -41,7 +41,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: modify-sciencedata-to-sa
-  namespace: sciencedata-dev
+  namespace: sciencedata
 subjects:
   - kind: ServiceAccount
     name: user-pods-backend
@@ -74,7 +74,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: user-pods-backend
-    namespace: sciencedata-dev
+    namespace: sciencedata
 roleRef:
   kind: ClusterRole
   name: provision-nfs
@@ -84,52 +84,30 @@ roleRef:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: user-pods-backend-testing
-  namespace: sciencedata-dev
+  name: user-pods-backend
+  namespace: sciencedata
   labels:
-    app: user-pods-backend-testing
+    app: user-pods-backend
 spec:
   serviceAccountName: user-pods-backend
   imagePullSecrets:
     - name: docker-registry-auth
   containers:
-    - name: user-pods-backend-testing
-      image: dockerregistry.clement.tel/user_pods_backend_testing
+    - name: user-pods-backend
+      image: dockerregistry.clement.tel/user_pods_backend
       env:
-        - name: "SSH_PUBLIC_KEY"
-          value: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n"
         - name: "BACKEND_LOCALREGISTRYURL"
           value: "dockerregistry.clement.tel"
         - name: "BACKEND_LOCALREGISTRYSECRET"
           value: "docker-registry-auth"
         - name: "BACKEND_INGRESSDOMAIN"
-          value: "testpods.clement.tel"
+          value: "pods.clement.tel"
+        - name: "BACKEND_NAMESPACE"
+          value: "sciencedata"
       ports:
-        - containerPort: 22
-          protocol: TCP
         - containerPort: 80
           protocol: TCP
-      securityContext:
-        capabilities:
-          add:
-            - "SYS_CHROOT"
-            - "AUDIT_WRITE"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: user-pods-backend-testing-ssh
-  namespace: sciencedata-dev
-spec:
-  type: NodePort
-  ports:
-    - port: 22
-      targetPort: 22
-      name: ssh
-      protocol: TCP
-      nodePort: 30002
-  selector:
-    app: user-pods-backend-testing
+
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -137,16 +115,16 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
     nginx.ingress.kubernetes.io/whitelist-source-range: 127.0.0.0/8,10.0.0.0/8
-  name: user-pods-backend-testing
-  namespace: sciencedata-dev
+  name: user-pods-backend
+  namespace: sciencedata
 spec:
   rules:
-    - host: testkube.sciencedata.dk
+    - host: kube.sciencedata.dk
       http:
         paths:
           - backend:
               service:
-                name: user-pods-backend-testing-http
+                name: user-pods-backend-http
                 port:
                   number: 80
             path: /
@@ -156,8 +134,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: user-pods-backend-testing-http
-  namespace: sciencedata-dev
+  name: user-pods-backend-http
+  namespace: sciencedata
 spec:
   type: ClusterIP
   ports:
@@ -165,4 +143,4 @@ spec:
       targetPort: 80
       protocol: TCP
   selector:
-    app: user-pods-backend-testing
+    app: user-pods-backend

@@ -1,0 +1,75 @@
+### In order for ingresses to work, a wildcard certificate matching
+# "*.{{ ingressDomain }}" needs to be saved as a secret in this namespace.
+
+# This manifest will create the certificate assuming:
+#   - cert-manager is installed in the cluster
+#   - there is a DNS A record pointing "*.{{ ingressDomain }}" to the pod's public IP
+#   - there is an API key saved as a secret in this namespace to the DNS provider
+#     (in this example, cloudflare) with permission to add a txt record on ingressDomain
+#     to answer the letsencrypt challenge. http01 is not possible for wildcard certs.
+#     See https://cert-manager.io/docs/configuration/acme/dns01/
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: user-pods-issuer
+  namespace: sciencedata-dev
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: joshuaclement@deic.dk
+    privateKeySecretRef:
+      name: user-pods-issuer-privatekey
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-secret
+              key: api-token
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: user-pods-wildcard
+  namespace: sciencedata-dev
+spec:
+  secretName: user-pods-wildcard
+  issuerRef:
+    name: user-pods-issuer
+    kind: Issuer
+  commonName: "*.{{ ingressDomainTesting }}"
+  dnsNames:
+    - "*.{{ ingressDomainTesting }}"
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: user-pods-issuer
+  namespace: sciencedata
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: joshuaclement@deic.dk
+    privateKeySecretRef:
+      name: user-pods-issuer-privatekey
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-secret
+              key: api-token
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: user-pods-wildcard
+  namespace: sciencedata
+spec:
+  secretName: user-pods-wildcard
+  issuerRef:
+    name: user-pods-issuer
+    kind: Issuer
+  commonName: "*.{{ ingressDomain }}"
+  dnsNames:
+    - "*.{{ ingressDomain }}"

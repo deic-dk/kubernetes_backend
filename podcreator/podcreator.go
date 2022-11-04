@@ -130,7 +130,7 @@ func (pc *PodCreator) getYaml() (string, error) {
 	}
 	response, err := http.Get(pc.yamlURL)
 	if err != nil {
-		return "", errors.New(fmt.Sprintf("Could not fetch manifest from given url: %s", pc.yamlURL))
+		return "", errors.New(fmt.Sprintf("Could not fetch manifest from given url %s: %s", pc.yamlURL, err.Error()))
 	}
 	defer response.Body.Close()
 
@@ -141,7 +141,7 @@ func (pc *PodCreator) getYaml() (string, error) {
 
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		return "", errors.New(fmt.Sprintf("Could not parse manifest from given url: %s", pc.yamlURL))
+		return "", errors.New(fmt.Sprintf("Could not parse manifest from given url %s: %s", pc.yamlURL, err.Error()))
 	}
 
 	return string(body), nil

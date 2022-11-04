@@ -12,7 +12,6 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     ca-certificates \
     curl
 
-
 # unminimize the ubuntu image
 RUN sed -i 's/^read.*//g' /usr/local/sbin/unminimize && \
     sed -i 's/exit 1/echo "skip"/g' /usr/local/sbin/unminimize && \
@@ -41,6 +40,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y golang && \
 
 RUN mkdir /tmp/podcaches
 
-ADD [".", "/root/user_pods_backend/"]
+ADD "." "/root/user_pods_backend/"
+
+WORKDIR "/root/user_pods_backend"
+
+RUN go build main.go
 
 CMD ["/usr/sbin/sshd", "-D"]
