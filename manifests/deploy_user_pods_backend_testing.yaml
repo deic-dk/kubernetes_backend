@@ -40,7 +40,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: modify-sciencedata-to-sa
+  name: user-pods-modify-sciencedata-testing
   namespace: sciencedata-dev
 subjects:
   - kind: ServiceAccount
@@ -54,7 +54,7 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: provision-nfs
+  name: provision-nfs-testing
 rules:
   - apiGroups: [""]
     resources:
@@ -70,14 +70,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: provision-nfs-to-sa
+  name: user-pods-provision-nfs-testing
 subjects:
   - kind: ServiceAccount
     name: user-pods-backend
     namespace: sciencedata-dev
 roleRef:
   kind: ClusterRole
-  name: provision-nfs
+  name: provision-nfs-testing
   apiGroup: rbac.authorization.k8s.io
 
 ---

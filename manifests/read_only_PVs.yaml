@@ -18,6 +18,43 @@ spec:
     server: 10.0.0.20
   claimRef:
     name: jupyter-sciencedata-v1.0.0
+    namespace: sciencedata
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jupyter-sciencedata-v1.0.0
+  namespace: sciencedata
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: jupyter-sciencedata-v1.0.0
+---
+# Duplicate of PV and PVC for testing. Note that the testing PV has a different name because they are not namespaced!
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: jupyter-sciencedata-v1.0.0-testing
+spec:
+  capacity:
+    storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nfs:
+    path: /tank/storage/user-pods-read-only/jupyter-sciencedata-v1.0.0
+    server: 10.0.0.20
+  claimRef:
+    name: jupyter-sciencedata-v1.0.0
     namespace: sciencedata-dev
 
 ---
@@ -32,4 +69,4 @@ spec:
   resources:
     requests:
       storage: 10Gi
-  volumeName: jupyter-sciencedata-v1.0.0
+  volumeName: jupyter-sciencedata-v1.0.0-testing
