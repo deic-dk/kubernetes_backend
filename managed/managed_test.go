@@ -31,8 +31,11 @@ func newUser(uid string) User {
 func checkStartJobSuccess(pod Pod) error {
 	info := pod.GetPodInfo()
 	// Check that all keys that should be there are in podInfo
-	for annotationKey, annotationValue := range pod.Object.ObjectMeta.Annotations {
-		if annotationValue == "copyForFrontend" {
+	annotationString, hasTokenAnnotation := pod.Object.ObjectMeta.Annotations["sciencedata.dk/copy-token"]
+	var annotationKeys []string
+	if hasTokenAnnotation {
+		annotationKeys = strings.Split(annotationString, ",")
+		for _, annotationKey := range annotationKeys {
 			hasKey := false
 			for key := range info.Tokens {
 				if key == annotationKey {
@@ -41,15 +44,18 @@ func checkStartJobSuccess(pod Pod) error {
 				}
 			}
 			if !hasKey {
-				return errors.New(fmt.Sprintf("Pod %s has key %s in annotations but not in pod info", pod.Object.Name, annotationKey))
+				return errors.New(fmt.Sprintf("Pod %s has key %s in copy-token annotation but not in pod info", pod.Object.Name, annotationKey))
 			}
 		}
 	}
-	// Check that all keys in podInfo are supposed to be there and have correct values
+	// Check that all tokens in podInfo are supposed to be there
 	for key, value := range info.Tokens {
 		hasKey := false
-		for annotationKey, annotationValue := range pod.Object.ObjectMeta.Annotations {
-			if annotationKey == key && annotationValue == "copyForFrontend" {
+		if !hasTokenAnnotation {
+			return errors.New(fmt.Sprintf("Pod %s has key %s in podcache but doesn't have a copy-token annotation", pod.Object.Name, key))
+		}
+		for _, annotationKey := range annotationKeys {
+			if annotationKey == key {
 				hasKey = true
 				break
 			}
@@ -57,6 +63,7 @@ func checkStartJobSuccess(pod Pod) error {
 		if !hasKey {
 			return errors.New(fmt.Sprintf("Pod %s has key %s in tokens, but isn't specified in annotations", pod.Object.Name, key))
 		}
+		// Check whether the value in the podcache matches a newly retrieved key
 		currentValue, err := pod.GetToken(key)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Error retrieving token for pod %s: %s", pod.Object.Name, err.Error()))

@@ -610,18 +610,20 @@ func (p *Pod) CreateAndSavePodCache(reload bool) error {
 	)
 }
 
-// for each pod.metadata.annotations[key]=="copyForFrontend",
+// for each comma-separated token key in pod.metadata.annotations["sciencedata.dk/copy-token"],
 // copy the token from the pod held in /tmp/key to the filesystem, ready to be served by getPods.
 // If reload is true, it will only attempt each token once,
 // otherwise, it will try a few times to give the pod time to create /tmp/key after starting
 func (p *Pod) getAllTokens(reload bool) map[string]string {
 	tokenMap := make(map[string]string)
-	var toCopy []string
-	for key, value := range p.Object.ObjectMeta.Annotations {
-		if value == "copyForFrontend" {
-			toCopy = append(toCopy, key)
-		}
+	keys, has := p.Object.ObjectMeta.Annotations["sciencedata.dk/copy-token"]
+	// If the copy-token annotiation doesn't exist
+	if !has {
+		return tokenMap
 	}
+	// Get a list of tokens to attempt to copy
+	toCopy := strings.Split(keys, ",")
+
 	for _, key := range toCopy {
 		var err error
 		var token string
