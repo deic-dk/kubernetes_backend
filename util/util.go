@@ -120,12 +120,10 @@ type GlobalConfig struct {
 	WhitelistManifestRegex string
 	TokenByteLimit         int
 	NfsStorageRoot         string
-	MandatoryEnvVars       map[string]string
 	TestingHost            string
 	LocalRegistryURL       string
 	LocalRegistrySecret    string
 	IngressDomain          string
-	IngressIssuer          string
 	IngressWildcardSecret  string
 }
 

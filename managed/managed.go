@@ -781,9 +781,6 @@ func (p *Pod) getTargetIngress() *netv1.Ingress {
 			Labels: map[string]string{
 				"createdForPod": p.Object.Name,
 			},
-			Annotations: map[string]string{
-				"cert-manager.io/issuer": p.GlobalConfig.IngressIssuer,
-			},
 		},
 		Spec: netv1.IngressSpec{
 			TLS: []netv1.IngressTLS{
