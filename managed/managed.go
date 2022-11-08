@@ -8,8 +8,8 @@ import (
 	"io/ioutil"
 	"os"
 	"regexp"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
@@ -294,6 +294,7 @@ type PodInfo struct {
 	Age               string            `json:"age"`
 	Status            string            `json:"status"`
 	Url               string            `json:"url"`
+	SshUrl            string            `json:"ssh_url"`
 	Tokens            map[string]string `json:"tokens"`
 	OtherResourceInfo map[string]string `json:"k8s_pod_info"`
 }
@@ -353,9 +354,21 @@ func (p *Pod) GetPodInfo() PodInfo {
 	if err == nil {
 		podInfo.Tokens = cache.Tokens
 		podInfo.OtherResourceInfo = cache.OtherResourceInfo
+		sshPort, hasSshPort := cache.OtherResourceInfo["sshPort"]
+		if hasSshPort {
+			podInfo.SshUrl = p.getSshUrl(sshPort)
+		}
 	}
 
 	return podInfo
+}
+
+// Generate the url by which a user can access the pod via ssh
+// Note that `port` must be an integer represented as a string,
+// which is assumed to be the case following from Pod.getSshPort
+func (p *Pod) getSshUrl(port string) string {
+	// Could get username from an env variable set in the manifest. For now only root ubuntu pods use ssh.
+	return fmt.Sprintf("ssh://root@%s:%s", p.GlobalConfig.IngressDomain, port)
 }
 
 func (p *Pod) NeedsSshService() bool {
@@ -796,7 +809,7 @@ func (p *Pod) getTargetIngress() *netv1.Ingress {
 						HTTP: &netv1.HTTPIngressRuleValue{
 							Paths: []netv1.HTTPIngressPath{
 								{
-									Path: "/",
+									Path:     "/",
 									PathType: &pathType,
 									Backend: netv1.IngressBackend{
 										Service: &netv1.IngressServiceBackend{
