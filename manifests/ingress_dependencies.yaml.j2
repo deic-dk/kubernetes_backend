@@ -1,13 +1,9 @@
 ### In order for ingresses to work, a wildcard certificate matching
-# "*.{{ ingressDomain }}" needs to be saved as a secret in this namespace.
+# "*.{{ backend_ingress_domain }}" needs to be saved as a secret in this namespace.
 
 # This manifest will create the certificate assuming:
 #   - cert-manager is installed in the cluster
-#   - there is a DNS A record pointing "*.{{ ingressDomain }}" to the pod's public IP
-#   - there is an API key saved as a secret in this namespace to the DNS provider
-#     (in this example, cloudflare) with permission to add a txt record on ingressDomain
-#     to answer the letsencrypt challenge. http01 is not possible for wildcard certs.
-#     See https://cert-manager.io/docs/configuration/acme/dns01/
+#   - there is a DNS A record pointing "*.{{ backend_ingress_domain }}" to the issuer pod's public IP
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -16,7 +12,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: joshuaclement@deic.dk
+    email: {{ letsencrypt_email }}
     privateKeySecretRef:
       name: user-pods-issuer-privatekey
     solvers:
@@ -37,9 +33,19 @@ spec:
   issuerRef:
     name: user-pods-issuer
     kind: Issuer
-  commonName: "*.{{ ingressDomainTesting }}"
+  commonName: "*.{{ backend_ingress_domain_testing }}"
   dnsNames:
-    - "*.{{ ingressDomainTesting }}"
+    - "*.{{ backend_ingress_domain_testing }}"
+---
+# Need an API token to add a txt DNS record to meet the letsencrypt challenge for a wildcard cert
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-api-secret
+  namespace: sciencedata-dev
+type: Opaque
+stringData:
+  api-token: {{ cloudflare_api_token }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Issuer
@@ -49,7 +55,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: joshuaclement@deic.dk
+    email: {{ letsencrypt_email }}
     privateKeySecretRef:
       name: user-pods-issuer-privatekey
     solvers:
@@ -70,6 +76,16 @@ spec:
   issuerRef:
     name: user-pods-issuer
     kind: Issuer
-  commonName: "*.{{ ingressDomain }}"
+  commonName: "*.{{ backend_ingress_domain }}"
   dnsNames:
-    - "*.{{ ingressDomain }}"
+    - "*.{{ backend_ingress_domain }}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-api-secret
+  namespace: sciencedata-dev
+type: Opaque
+stringData:
+  api-token: {{ cloudflare_api_token }}
+---

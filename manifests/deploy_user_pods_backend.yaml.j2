@@ -97,11 +97,11 @@ spec:
       image: dockerregistry.clement.tel/user_pods_backend
       env:
         - name: "BACKEND_LOCALREGISTRYURL"
-          value: "dockerregistry.clement.tel"
+          value: "{{ docker_registry_domain }}"
         - name: "BACKEND_LOCALREGISTRYSECRET"
           value: "docker-registry-auth"
         - name: "BACKEND_INGRESSDOMAIN"
-          value: "pods.clement.tel"
+          value: "{{ backend_ingress_domain }}"
         - name: "BACKEND_NAMESPACE"
           value: "sciencedata"
       ports:

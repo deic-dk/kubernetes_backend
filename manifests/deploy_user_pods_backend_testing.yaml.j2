@@ -97,13 +97,13 @@ spec:
       image: dockerregistry.clement.tel/user_pods_backend_testing
       env:
         - name: "SSH_PUBLIC_KEY"
-          value: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n"
+          value: "{{ backend_ssh_pubkey }}"
         - name: "BACKEND_LOCALREGISTRYURL"
-          value: "dockerregistry.clement.tel"
+          value: "{{ docker_registry_domain }}"
         - name: "BACKEND_LOCALREGISTRYSECRET"
           value: "docker-registry-auth"
         - name: "BACKEND_INGRESSDOMAIN"
-          value: "testpods.clement.tel"
+          value: "{{ backend_ingress_domain_testing }}"
       ports:
         - containerPort: 22
           protocol: TCP

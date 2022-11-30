@@ -15,7 +15,7 @@ spec:
     - nfsvers=4.1
   nfs:
     path: /tank/storage/user-pods-read-only/jupyter-sciencedata-v1.0.0
-    server: 10.0.0.20
+    server: {{ backend_readonly_pv_nfs_ip }}
   claimRef:
     name: jupyter-sciencedata-v1.0.0
     namespace: sciencedata
@@ -52,7 +52,7 @@ spec:
     - nfsvers=4.1
   nfs:
     path: /tank/storage/user-pods-read-only/jupyter-sciencedata-v1.0.0
-    server: 10.0.0.20
+    server: {{ backend_readonly_pv_nfs_ip }}
   claimRef:
     name: jupyter-sciencedata-v1.0.0
     namespace: sciencedata-dev
