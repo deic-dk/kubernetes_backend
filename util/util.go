@@ -125,6 +125,8 @@ type GlobalConfig struct {
 	LocalRegistrySecret    string
 	IngressDomain          string
 	IngressWildcardSecret  string
+	PodSubnetCidr          string
+	PodSubnet              *net.IPNet
 }
 
 func SaveGlobalConfig(c GlobalConfig) error {
@@ -190,6 +192,11 @@ func MustLoadGlobalConfig() GlobalConfig {
 	// Check that TestingHost is an IP address
 	if addr := net.ParseIP(config.TestingHost); addr == nil {
 		panic(fmt.Sprintf("TestingHost %s not a valid ip address", config.TestingHost))
+	}
+
+	_, config.PodSubnet, err = net.ParseCIDR(config.PodSubnetCidr)
+	if err != nil {
+		panic(fmt.Sprintf("Couldn't parse PodSubnetCidr %s, %s", config.PodSubnetCidr, err.Error()))
 	}
 
 	return config

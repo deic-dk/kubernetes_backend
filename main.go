@@ -22,6 +22,7 @@ func main() {
 	http.HandleFunc("/watch_delete_pod", server.ServeWatchDeletePod)
 	http.HandleFunc("/delete_all_user", server.ServeDeleteAllUserPods)
 	http.HandleFunc("/clean_all_unused", server.ServeCleanAllUnused)
+	http.HandleFunc("/get_podip_owner", server.ServeGetPodIPOwner)
 
 	fmt.Printf("Listening\n")
 	err := http.ListenAndServe(":80", nil)

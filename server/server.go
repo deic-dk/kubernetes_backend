@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -72,6 +73,11 @@ type DeleteAllPodsRequest struct {
 
 type DeleteAllPodsResponse struct {
 	Deleted bool `json:"deleted"`
+}
+
+type GetPodIPOwnerRequest struct {
+	PodIP    string
+	RemoteIP string
 }
 
 type watchMapEntry struct {
@@ -755,6 +761,48 @@ func (s *Server) ServeCleanAllUnused(w http.ResponseWriter, r *http.Request) {
 
 	// write the response
 	w.WriteHeader(status)
+}
+
+func (s *Server) getPodIPOwner(request GetPodIPOwnerRequest) string {
+	listOptions := metav1.ListOptions{FieldSelector: fmt.Sprintf("status.podIP=%s", request.PodIP)}
+	podList, err := s.Client.ListPods(listOptions)
+	if err != nil {
+		fmt.Printf("Error listing pods for getPodIPOwner, requested IP %s: %s", request.PodIP, err.Error())
+		return ""
+	}
+	if len(podList.Items) > 0 {
+		return util.GetUserIDFromLabels(podList.Items[0].Labels)
+	}
+	return ""
+}
+
+func (s *Server) ServeGetPodIPOwner(w http.ResponseWriter, r *http.Request) {
+	remoteIP := s.getRemoteIP(r)
+	ipList, has := r.URL.Query()["ip"]
+	if !has {
+		fmt.Printf("Warning: getPodIPOwner request from %s without specified IP\n", remoteIP)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	ip := ipList[0]
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		fmt.Printf("Warning: getPodIPOwner request from %s with invalid IP %s\n", remoteIP, ip)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if !s.GlobalConfig.PodSubnet.Contains(parsedIP) {
+		fmt.Printf("Warning: getPodIPOwner request from %s with IP outside pod subnet %s\n", remoteIP, ip)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	request := GetPodIPOwnerRequest{
+		RemoteIP: remoteIP,
+		PodIP:    ip,
+	}
+	userID := s.getPodIPOwner(request)
+	fmt.Printf("getPodIPOwner request %+v, owned by %s\n", request, userID)
+	fmt.Fprintf(w, userID)
 }
 
 func (s *Server) ReloadPodCaches() error {
