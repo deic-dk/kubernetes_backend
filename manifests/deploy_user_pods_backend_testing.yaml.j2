@@ -136,7 +136,7 @@ kind: Ingress
 metadata:
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    nginx.ingress.kubernetes.io/whitelist-source-range: 127.0.0.0/8,10.0.0.0/8
+    nginx.ingress.kubernetes.io/whitelist-source-range: 127.0.0.0/8,{{ trusted_network_cidr }},{{ vlan_subnet_cidr }}
   name: user-pods-backend-testing
   namespace: sciencedata-dev
 spec:
