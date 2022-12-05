@@ -17,13 +17,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	testUser = "registeredtest7"
-	remoteIP = "10.0.0.20"
-)
-
 func newUser(uid string) User {
 	config := util.MustLoadGlobalConfig()
+	if uid == "" {
+		uid = config.TestUser
+	}
 	client := k8sclient.NewK8sClient(config)
 	return NewUser(uid, client, config)
 }
@@ -124,10 +122,10 @@ func TestListOptions(t *testing.T) {
 }
 
 func TestListPods(t *testing.T) {
-	u := newUser(testUser)
+	u := newUser("")
 
 	// Make sure the user has some pods
-	err := testingutil.EnsureUserHasNPods(u.Name, 3, u.GlobalConfig)
+	err := testingutil.EnsureUserHasNPods(u.UserID, 3)
 	if err != nil {
 		t.Fatalf("Couldn't create pods for user: %s", err.Error())
 	}
@@ -160,10 +158,10 @@ func TestListPods(t *testing.T) {
 }
 
 func TestOwnership(t *testing.T) {
-	u := newUser(testUser)
+	u := newUser("")
 
 	// Make sure the user has some pods
-	err := testingutil.EnsureUserHasNPods(u.Name, 3, u.GlobalConfig)
+	err := testingutil.EnsureUserHasNPods(u.UserID, 3)
 	if err != nil {
 		t.Fatalf("Couldn't create pods for user: %s", err.Error())
 	}
@@ -230,7 +228,7 @@ func TestCreateDeleteUserStorage(t *testing.T) {
 
 	// Create storage for this user
 	ready := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
-	err = u.CreateUserStorageIfNotExist(ready, remoteIP)
+	err = u.CreateUserStorageIfNotExist(ready, u.GlobalConfig.TestingHost)
 	if err != nil {
 		t.Fatalf("Failed to create user storage %s", err.Error())
 	}
@@ -293,7 +291,7 @@ func TestUserStorageValidity(t *testing.T) {
 	for _, userName := range userNames {
 		u := newUser(userName)
 		ready := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
-		err := u.CreateUserStorageIfNotExist(ready, remoteIP)
+		err := u.CreateUserStorageIfNotExist(ready, u.GlobalConfig.TestingHost)
 		if err != nil {
 			t.Fatalf("Couldn't create storage for user %s: %s", userName, err.Error())
 		}
@@ -320,9 +318,9 @@ func TestUserStorageValidity(t *testing.T) {
 }
 
 func TestPodData(t *testing.T) {
-	u := newUser(testUser)
+	u := newUser("")
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests, u.GlobalConfig)
+	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests)
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -368,9 +366,9 @@ func TestPodData(t *testing.T) {
 
 func TestJobs(t *testing.T) {
 	// Make sure the user has one of each of the standard pod types to attempt to rerun jobs
-	u := newUser(testingutil.TestUser)
+	u := newUser("")
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests, u.GlobalConfig)
+	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests)
 	if err != nil {
 		t.Fatalf("Couldn't ensure user had all pods: %s", err.Error())
 	}
@@ -433,8 +431,8 @@ func TestJobs(t *testing.T) {
 
 func TestIngress(t *testing.T) {
 	// Ensure user pods are deleted first
-	u := newUser(testingutil.TestUser)
-	err := testingutil.DeleteAllUserPods(u.Name)
+	u := newUser("")
+	err := testingutil.DeleteAllUserPods(u.UserID)
 	if err != nil {
 		t.Fatalf("Error deleting user pods: %s", err.Error())
 	}
@@ -446,7 +444,7 @@ func TestIngress(t *testing.T) {
 	}
 
 	finished := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
-	err = testingutil.WatchCreatePod(u.Name, podName, finished)
+	err = testingutil.WatchCreatePod(u.UserID, podName, finished)
 	if err != nil {
 		t.Fatalf("Couldn't watch creation of testing pod: %s", err.Error())
 	}
@@ -469,7 +467,10 @@ func TestIngress(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		response, err := http.Get(fmt.Sprintf("https://%s", testPod.getIngressHost()))
 		if err != nil {
-			t.Fatalf("Error making http get request %s", err.Error())
+			failed = err
+			t.Logf("Failed %d time(s), waiting a second to try again", i + 1)
+			time.Sleep(1 * time.Second)
+			continue
 		}
 		defer response.Body.Close()
 		// This can get a 404 while the testing container's starting script is running
@@ -492,7 +493,7 @@ func TestIngress(t *testing.T) {
 	}
 
 	// Clean up by deleting the testing pod
-	_, err = testingutil.DeletePod(u.Name, podName)
+	_, err = testingutil.DeletePod(u.UserID, podName)
 	if err != nil {
 		t.Fatalf("Couldn't delete testing pod: %s", err.Error())
 	}

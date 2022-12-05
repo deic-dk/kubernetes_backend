@@ -127,6 +127,8 @@ type GlobalConfig struct {
 	IngressWildcardSecret  string
 	PodSubnetCidr          string
 	PodSubnet              *net.IPNet
+	TestSshKey             string
+	TestUser               string
 }
 
 func SaveGlobalConfig(c GlobalConfig) error {

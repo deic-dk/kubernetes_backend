@@ -139,13 +139,13 @@ func TestRemoteIP(t *testing.T) {
 func TestDeleteAllUserPods(t *testing.T) {
 	s := newServer()
 	// First ensure that the user has at least 2 pods to delete
-	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, 2, s.GlobalConfig)
+	err := testingutil.EnsureUserHasNPods(s.GlobalConfig.TestUser, 2)
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
 
 	// Make sure the user storage exists
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
+	u := managed.NewUser(s.GlobalConfig.TestUser, s.Client, s.GlobalConfig)
 	storageExists, err := userPVAndPVCExist(u)
 	if err != nil {
 		t.Fatalf("Couldn't check storage exists: %s", err.Error())
@@ -157,7 +157,7 @@ func TestDeleteAllUserPods(t *testing.T) {
 	t.Logf("User has at least two pods and their storage PV and PVC exist. Attempting deleteAllUserPods")
 
 	// Now call delete all Pods and ensure that it works
-	deleteAllRequest := DeleteAllPodsRequest{UserID: testingutil.TestUser}
+	deleteAllRequest := DeleteAllPodsRequest{UserID: s.GlobalConfig.TestUser}
 	finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
 	err = s.deleteAllUserPods(deleteAllRequest.UserID, finished)
 	if err != nil {
@@ -221,14 +221,14 @@ func TestDeleteAllUserPods(t *testing.T) {
 func TestStandardPodCreation(t *testing.T) {
 	s := newServer()
 	// Double check that the user doesn't have any pods
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
+	u := managed.NewUser(s.GlobalConfig.TestUser, s.Client, s.GlobalConfig)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 	// If there are some remaining, then call deleteAllUserPods
 	if len(podList) != 0 {
-		deleteAllRequest := DeleteAllPodsRequest{UserID: testingutil.TestUser}
+		deleteAllRequest := DeleteAllPodsRequest{UserID: s.GlobalConfig.TestUser}
 		finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
 		err = s.deleteAllUserPods(deleteAllRequest.UserID, finished)
 		if err != nil {
@@ -250,7 +250,7 @@ func TestStandardPodCreation(t *testing.T) {
 				YamlURL:          request.YamlURL,
 				UserID:           request.UserID,
 				ContainerEnvVars: request.Settings,
-				RemoteIP:         testingutil.RemoteIP,
+				RemoteIP:         s.GlobalConfig.TestingHost,
 			}
 			finished := util.NewReadyChannel(s.GlobalConfig.TimeoutCreate)
 			createResponse, err := s.createPod(createRequest, finished)
@@ -302,16 +302,16 @@ func TestStandardPodCreation(t *testing.T) {
 
 func TestGetPods(t *testing.T) {
 	s := newServer()
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
+	u := managed.NewUser(s.GlobalConfig.TestUser, s.Client, s.GlobalConfig)
 
 	// Make sure the user has at least two of each of the standard pods
-	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, 2*len(testingutil.GetStandardPodRequests()), s.GlobalConfig)
+	err := testingutil.EnsureUserHasNPods(s.GlobalConfig.TestUser, 2*len(testingutil.GetStandardPodRequests()))
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
 
 	// Now call getPods
-	request := GetPodsRequest{UserID: testingutil.TestUser, RemoteIP: testingutil.RemoteIP}
+	request := GetPodsRequest{UserID: s.GlobalConfig.TestUser, RemoteIP: s.GlobalConfig.TestingHost}
 	response, err := s.getPods(request)
 	if err != nil {
 		t.Fatalf("getPods failed %s", err.Error())
@@ -342,9 +342,9 @@ func TestGetPods(t *testing.T) {
 
 func TestDeletePod(t *testing.T) {
 	s := newServer()
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
+	u := managed.NewUser(s.GlobalConfig.TestUser, s.Client, s.GlobalConfig)
 
-	err := testingutil.EnsureUserHasNPods(testingutil.TestUser, 2*len(testingutil.GetStandardPodRequests()), s.GlobalConfig)
+	err := testingutil.EnsureUserHasNPods(s.GlobalConfig.TestUser, 2*len(testingutil.GetStandardPodRequests()))
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -362,9 +362,9 @@ func TestDeletePod(t *testing.T) {
 	// Attempt to delete with a mismatched podName and userID
 	t.Logf("Attempting to delete a pod not owned by the user")
 	deleteRequest := DeletePodRequest{
-		UserID:   fmt.Sprintf("%s-extrastring", testingutil.TestUser),
+		UserID:   fmt.Sprintf("%s-extrastring", s.GlobalConfig.TestUser),
 		PodName:  podName,
-		RemoteIP: testingutil.RemoteIP,
+		RemoteIP: s.GlobalConfig.TestingHost,
 	}
 	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 	_, err = s.deletePod(deleteRequest, finished)
@@ -378,9 +378,9 @@ func TestDeletePod(t *testing.T) {
 	t.Logf("Confirmed that the user has at least two pods. Attempting to delete %s", podName)
 	// Call for deletion
 	deleteRequest = DeletePodRequest{
-		UserID:   testingutil.TestUser,
+		UserID:   s.GlobalConfig.TestUser,
 		PodName:  podName,
-		RemoteIP: testingutil.RemoteIP,
+		RemoteIP: s.GlobalConfig.TestingHost,
 	}
 	finished = util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 	_, err = s.deletePod(deleteRequest, finished)
@@ -432,9 +432,9 @@ func TestDeletePod(t *testing.T) {
 	for i := 0; i < len(userPodList)-1; i++ {
 		// Call for deletion
 		deleteRequest := DeletePodRequest{
-			UserID:   testingutil.TestUser,
+			UserID:   s.GlobalConfig.TestUser,
 			PodName:  userPodList[i].Object.Name,
-			RemoteIP: testingutil.RemoteIP,
+			RemoteIP: s.GlobalConfig.TestingHost,
 		}
 		finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 		_, err = s.deletePod(deleteRequest, finished)
@@ -470,9 +470,9 @@ func TestDeletePod(t *testing.T) {
 		t.Fatalf("User should only have 1 pod left but has %d", len(userPodList))
 	}
 	deleteRequest = DeletePodRequest{
-		UserID:   testingutil.TestUser,
+		UserID:   s.GlobalConfig.TestUser,
 		PodName:  userPodList[0].Object.Name,
-		RemoteIP: testingutil.RemoteIP,
+		RemoteIP: s.GlobalConfig.TestingHost,
 	}
 	finished = util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 	_, err = s.deletePod(deleteRequest, finished)
@@ -512,9 +512,9 @@ func TestDeletePod(t *testing.T) {
 
 	t.Logf("Attempting to call deletePod for a pod that doesn't exist")
 	deleteRequest = DeletePodRequest{
-		UserID:   testingutil.TestUser,
+		UserID:   s.GlobalConfig.TestUser,
 		PodName:  "foobar-pod",
-		RemoteIP: testingutil.RemoteIP,
+		RemoteIP: s.GlobalConfig.TestingHost,
 	}
 	finished = util.NewReadyChannel(s.GlobalConfig.TimeoutDelete)
 	_, err = s.deletePod(deleteRequest, finished)
@@ -539,7 +539,7 @@ func TestWatchers(t *testing.T) {
 		YamlURL:          defaultRequest.YamlURL,
 		UserID:           defaultRequest.UserID,
 		ContainerEnvVars: defaultRequest.Settings,
-		RemoteIP:         testingutil.RemoteIP,
+		RemoteIP:         s.GlobalConfig.TestingHost,
 	}
 
 	// Start the pod
@@ -656,7 +656,7 @@ func TestCleanAllUnused(t *testing.T) {
 
 	// Ensure the testuser has some pods and their services that shouldn't be affected by cleanAllUnused
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := testingutil.EnsureUserHasEach(testingutil.TestUser, defaultRequests, s.GlobalConfig)
+	err := testingutil.EnsureUserHasEach(s.GlobalConfig.TestUser, defaultRequests)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -667,7 +667,7 @@ func TestCleanAllUnused(t *testing.T) {
 	for i, user := range testUsernames {
 		u := managed.NewUser(user, s.Client, s.GlobalConfig)
 		ready := util.NewReadyChannel(s.GlobalConfig.TimeoutCreate)
-		err := u.CreateUserStorageIfNotExist(ready, testingutil.RemoteIP)
+		err := u.CreateUserStorageIfNotExist(ready, s.GlobalConfig.TestingHost)
 		if err != nil {
 			t.Fatalf("Couldn't create storage for user %s, %s", user, err.Error())
 		}
@@ -752,7 +752,7 @@ func TestCleanAllUnused(t *testing.T) {
 	}
 
 	// Check that all the user's pods and their related parts still exist
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
+	u := managed.NewUser(s.GlobalConfig.TestUser, s.Client, s.GlobalConfig)
 	storageOkay, err := userPVAndPVCExist(u)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -805,7 +805,7 @@ func TestCleanAllUnused(t *testing.T) {
 	}
 
 	// delete the testUser pods to clean up
-	deleteAllRequest := DeleteAllPodsRequest{UserID: testingutil.TestUser}
+	deleteAllRequest := DeleteAllPodsRequest{UserID: s.GlobalConfig.TestUser}
 	finished = util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
 	err = s.deleteAllUserPods(deleteAllRequest.UserID, finished)
 	if err != nil {
@@ -823,13 +823,13 @@ func TestReloadCache(t *testing.T) {
 	s := newServer()
 	// First ensure that the user has each of the standard pods
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := testingutil.EnsureUserHasEach(testingutil.TestUser, defaultRequests, s.GlobalConfig)
+	err := testingutil.EnsureUserHasEach(s.GlobalConfig.TestUser, defaultRequests)
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
 
 	// Then delete their podCaches
-	u := managed.NewUser(testingutil.TestUser, s.Client, s.GlobalConfig)
+	u := managed.NewUser(s.GlobalConfig.TestUser, s.Client, s.GlobalConfig)
 	podList, err := u.ListPods()
 	if err != nil {
 		t.Fatalf(err.Error())

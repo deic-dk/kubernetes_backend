@@ -15,14 +15,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func newUser(uid string) managed.User {
+func newUser() managed.User {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
-	return managed.NewUser(uid, client, config)
+	return managed.NewUser(config.TestUser, client, config)
 }
 
 func ensureUserHasEach(requests map[string]testingutil.CreatePodRequest) error {
-	u := newUser(testingutil.TestUser)
+	u := newUser()
 	userPodList, err := u.ListPods()
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't list user pods %s", err.Error()))
@@ -57,9 +57,9 @@ func ensureUserHasEach(requests map[string]testingutil.CreatePodRequest) error {
 
 func TestFailDeletePods(t *testing.T) {
 	// Make sure the user has one of each of the standard pod types to attempt to delete
-	u := newUser(testingutil.TestUser)
+	u := newUser()
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests, u.GlobalConfig)
+	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests)
 	if err != nil {
 		t.Fatalf("Couldn't ensure user had all pods: %s", err.Error())
 	}
@@ -103,9 +103,9 @@ func TestFailDeletePods(t *testing.T) {
 
 func TestDeletePod(t *testing.T) {
 	// Make sure the user has one of each of the standard pod types to attempt to delete
-	u := newUser(testingutil.TestUser)
+	u := newUser()
 	defaultRequests := testingutil.GetStandardPodRequests()
-	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests, u.GlobalConfig)
+	err := testingutil.EnsureUserHasEach(u.UserID, defaultRequests)
 	if err != nil {
 		t.Fatalf("Couldn't ensure user had all pods: %s", err.Error())
 	}
@@ -134,7 +134,7 @@ func TestDeletePod(t *testing.T) {
 
 	// Then delete them all
 	for _, pod := range podsToDelete {
-		pd, err := NewPodDeleter(pod.Object.Name, testingutil.TestUser, u.Client, u.GlobalConfig)
+		pd, err := NewPodDeleter(pod.Object.Name, u.UserID, u.Client, u.GlobalConfig)
 		if err != nil {
 			t.Fatalf("Couldn't initialize pod deleter %s", err.Error())
 		}

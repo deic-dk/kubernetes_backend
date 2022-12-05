@@ -16,10 +16,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func newUser(uid string) managed.User {
+func newUser() managed.User {
 	config := util.MustLoadGlobalConfig()
 	client := k8sclient.NewK8sClient(config)
-	return managed.NewUser(uid, client, config)
+	return managed.NewUser(config.TestUser, client, config)
 }
 
 func checkEnvironmentVars(pod v1.Pod, request testingutil.CreatePodRequest, mandatoryEnvVars map[string]string) error {
@@ -88,15 +88,15 @@ func echoEnvVarInPod(pod managed.Pod, envVar string, nContainer int) (string, st
 
 func TestPodCreation(t *testing.T) {
 	// First delete all of the testUser's pods
+	u := newUser()
 	t.Log("Deleting all testUser pods")
-	err := testingutil.DeleteAllUserPods(testingutil.TestUser)
+	err := testingutil.DeleteAllUserPods(u.UserID)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 
 	// Then attempt to create two of each of the standard pod types
 	defaultRequests := testingutil.GetStandardPodRequests()
-	u := newUser(testingutil.TestUser)
 	for _, defaultRequest := range defaultRequests {
 		for i := 0; i < 2; i++ {
 			request := defaultRequest
@@ -109,7 +109,7 @@ func TestPodCreation(t *testing.T) {
 				}
 			}
 
-			pc, err := NewPodCreator(request.YamlURL, u.UserID, testingutil.RemoteIP, request.Settings, u.Client, u.GlobalConfig)
+			pc, err := NewPodCreator(request.YamlURL, u.UserID, u.GlobalConfig.TestingHost, request.Settings, u.Client, u.GlobalConfig)
 			if err != nil {
 				t.Fatalf("Could't initialize podcreator for %s", err.Error())
 			}
@@ -173,7 +173,7 @@ func TestPodCreation(t *testing.T) {
 func TestRegistrySettings(t *testing.T) {
 	// Initialize a default podCreator
 
-	u := newUser(testingutil.TestUser)
+	u := newUser()
 	u.GlobalConfig.LocalRegistrySecret = "testingregistrysecret"
 	u.GlobalConfig.LocalRegistryURL = "testingregistryurl"
 	defaultRequests := testingutil.GetStandardPodRequests()
@@ -183,7 +183,7 @@ func TestRegistrySettings(t *testing.T) {
 		request = r
 		break
 	}
-	pc, err := NewPodCreator(request.YamlURL, u.UserID, testingutil.RemoteIP, request.Settings, u.Client, u.GlobalConfig)
+	pc, err := NewPodCreator(request.YamlURL, u.UserID, u.GlobalConfig.TestingHost, request.Settings, u.Client, u.GlobalConfig)
 	if err != nil {
 		t.Fatal(err.Error())
 	}

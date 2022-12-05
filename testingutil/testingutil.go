@@ -12,13 +12,6 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/util"
 )
 
-const (
-	TestSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n joshua@myhost"
-	TestUser   = "registeredtest7"
-	RemoteIP   = "10.0.0.20"
-	HomeServer = "10.2.0.20"
-)
-
 type SupplementaryPodInfo struct {
 	NeedsSsh     bool
 	NeedsIngress bool
@@ -203,10 +196,11 @@ func DeletePod(userID string, podName string) (bool, error) {
 
 // Get a map of all standard pod types to their CreatePodRequests with default params
 func GetStandardPodRequests() map[string]CreatePodRequest {
+	config := util.MustLoadGlobalConfig()
 	response := make(map[string]CreatePodRequest)
 	response["jupyter"] = CreatePodRequest{
 		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
-		UserID:  TestUser,
+		UserID:  config.TestUser,
 		Settings: map[string]map[string]string{
 			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
 		},
@@ -214,9 +208,9 @@ func GetStandardPodRequests() map[string]CreatePodRequest {
 	}
 	response["ubuntu"] = CreatePodRequest{
 		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/ubuntu_sciencedata.yaml",
-		UserID:  TestUser,
+		UserID:  config.TestUser,
 		Settings: map[string]map[string]string{
-			"ubuntu-jammy": {"SSH_PUBLIC_KEY": TestSshKey},
+			"ubuntu-jammy": {"SSH_PUBLIC_KEY": config.TestSshKey},
 		},
 		Supplementary: SupplementaryPodInfo{NeedsSsh: true, NeedsIngress: false},
 	}
@@ -225,15 +219,16 @@ func GetStandardPodRequests() map[string]CreatePodRequest {
 
 // Get a map of all pod types useful for testing to their CreatePodRequests
 func GetTestingPodRequests() map[string]CreatePodRequest {
+	config := util.MustLoadGlobalConfig()
 	response := make(map[string]CreatePodRequest)
 	response["test_long_key"] = CreatePodRequest{
-		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/test_long_key.yaml",
-		UserID:  TestUser,
+		YamlURL:       "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/test_long_key.yaml",
+		UserID:        config.TestUser,
 		Supplementary: SupplementaryPodInfo{NeedsSsh: false, NeedsIngress: false},
 	}
 	response["http_hello_world"] = CreatePodRequest{
-		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/http_hello_world.yaml",
-		UserID:  TestUser,
+		YamlURL:       "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/http_hello_world.yaml",
+		UserID:        config.TestUser,
 		Supplementary: SupplementaryPodInfo{NeedsSsh: false, NeedsIngress: true},
 	}
 	return response
@@ -278,7 +273,8 @@ func GetPodNames(userID string) ([]string, error) {
 	return podNames, nil
 }
 
-func EnsureUserHasNPods(userID string, n int, config util.GlobalConfig) error {
+func EnsureUserHasNPods(userID string, n int) error {
+	config := util.MustLoadGlobalConfig()
 	userPodList, err := GetPodNames(userID)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't get_pods %s", err.Error()))
@@ -319,7 +315,8 @@ func EnsureUserHasNPods(userID string, n int, config util.GlobalConfig) error {
 	return nil
 }
 
-func EnsureUserHasEach(userID string, requests map[string]CreatePodRequest, config util.GlobalConfig) error {
+func EnsureUserHasEach(userID string, requests map[string]CreatePodRequest) error {
+	config := util.MustLoadGlobalConfig()
 	userPodList, err := GetPodNames(userID)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Couldn't get_pods %s", err.Error()))
