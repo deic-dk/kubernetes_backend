@@ -94,7 +94,7 @@ spec:
     - name: docker-registry-auth
   containers:
     - name: user-pods-backend
-      image: dockerregistry.clement.tel/user_pods_backend
+      image: {{ docker_registry_domain }}/user_pods_backend
       env:
         - name: "BACKEND_LOCALREGISTRYURL"
           value: "{{ docker_registry_domain }}"
@@ -104,6 +104,8 @@ spec:
           value: "{{ backend_ingress_domain }}"
         - name: "BACKEND_NAMESPACE"
           value: "sciencedata"
+        - name: "BACKEND_PODSUBNETCIDR"
+          value: "{{ pod_network_cidr }}"
       ports:
         - containerPort: 80
           protocol: TCP

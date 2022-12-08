@@ -94,7 +94,7 @@ spec:
     - name: docker-registry-auth
   containers:
     - name: user-pods-backend-testing
-      image: dockerregistry.clement.tel/user_pods_backend_testing
+      image: {{ docker_registry_domain }}/user_pods_backend_testing
       env:
         - name: "SSH_PUBLIC_KEY"
           value: "{{ backend_ssh_pubkey }}"
@@ -104,6 +104,8 @@ spec:
           value: "docker-registry-auth"
         - name: "BACKEND_INGRESSDOMAIN"
           value: "{{ backend_ingress_domain_testing }}"
+        - name: "BACKEND_PODSUBNETCIDR"
+          value: "{{ pod_network_cidr }}"
       ports:
         - containerPort: 22
           protocol: TCP
