@@ -111,6 +111,10 @@ func GetUserIDFromLabels(labels map[string]string) string {
 	return user
 }
 
+type HostnameListEntry struct {
+	Hostname string
+	Address  string
+}
 type GlobalConfig struct {
 	DefaultRestartPolicy   apiv1.RestartPolicy
 	TimeoutCreate          time.Duration
@@ -129,6 +133,8 @@ type GlobalConfig struct {
 	PodSubnet              *net.IPNet
 	TestSshKey             string
 	TestUser               string
+	HostnameList           []HostnameListEntry
+	HostnameMap            map[string]string
 }
 
 func SaveGlobalConfig(c GlobalConfig) error {
@@ -173,6 +179,15 @@ func MustLoadGlobalConfig() GlobalConfig {
 		panic(err.Error())
 	}
 
+	// Overwrite (should be empty) HostnameMap with a map generated from HostnameList
+	// This was necessary because having keys containing "." breaks unmarshalling
+	// Instead the config reads [address: , hostname: ] and creates map[address]hostname
+	hostnameMap := make(map[string]string)
+	for _, entry := range config.HostnameList {
+		hostnameMap[entry.Address] = entry.Hostname
+	}
+	config.HostnameMap = hostnameMap
+
 	// Validate the loaded configuration
 
 	// Check that WhitelistManifestRegex compiles to a regex
@@ -194,6 +209,13 @@ func MustLoadGlobalConfig() GlobalConfig {
 	// Check that TestingHost is an IP address
 	if addr := net.ParseIP(config.TestingHost); addr == nil {
 		panic(fmt.Sprintf("TestingHost %s not a valid ip address", config.TestingHost))
+	}
+
+	// Check that all of the keys in HostnameMap are valid IP addresses
+	for key, _ := range config.HostnameMap {
+		if addr := net.ParseIP(key); addr == nil {
+			panic(fmt.Sprintf("%s in config.HostnameMap is not a valid ip address", key))
+		}
 	}
 
 	_, config.PodSubnet, err = net.ParseCIDR(config.PodSubnetCidr)

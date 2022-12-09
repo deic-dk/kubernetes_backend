@@ -65,8 +65,17 @@ func (pc *PodCreator) getSiloIPDataNet() string {
 // the target pod, so that pods can know how to reach the user's data
 func (pc *PodCreator) getMandatoryEnvVars() map[string]string {
 	mandatoryEnvVars := make(map[string]string)
-	mandatoryEnvVars["HOME_SERVER"] = pc.getSiloIPDataNet()
+	mandatoryEnvVars["HOME_SERVER_IP"] = pc.getSiloIPDataNet()
 	mandatoryEnvVars["SD_UID"] = pc.user.UserID
+	hostname, hasKey := pc.globalConfig.HostnameMap[pc.siloIP]
+	if !hasKey {
+		hostname, hasKey = pc.globalConfig.HostnameMap[pc.getSiloIPDataNet()]
+	}
+	if hasKey {
+		mandatoryEnvVars["HOME_SERVER_HOSTNAME"] = hostname
+	} else {
+		fmt.Printf("Warning: Requested IP %s not found in config.HostnameMap", pc.siloIP)
+	}
 	return mandatoryEnvVars
 }
 

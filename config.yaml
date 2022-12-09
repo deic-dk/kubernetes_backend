@@ -14,3 +14,6 @@ ingressWildcardSecret: "user-pods-wildcard"
 podSubnetCidr: "10.128.0.0/15"
 testSshKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFFaL0dy3Dq4DA5GCqFBKVWZntBSF0RIeVd9/qdhIj2n joshua@myhost"
 testUser: "registeredtest7"
+hostnameList:
+  - hostname: silo7.sciencedata.dk
+    address: 10.0.0.20
