@@ -291,7 +291,9 @@ func EnsureUserHasNPods(userID string, n int) error {
 	for i := startingNumOfPods; i < n; i++ {
 		// Cycle through each of the podTypes in the defaultRequests
 		podType := podTypes[(i-startingNumOfPods)%len(podTypes)]
-		podName, err := CreatePod(defaultRequests[podType])
+		request := defaultRequests[podType]
+		request.UserID = userID
+		podName, err := CreatePod(request)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Failed while creating %s pod: %s", podType, err.Error()))
 		}

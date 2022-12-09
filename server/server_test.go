@@ -916,3 +916,36 @@ func TestValidUser(t *testing.T) {
 		}
 	}
 }
+
+func TestGetPodIPOwner(t *testing.T) {
+	s := newServer()
+	otherUserID := "misc@test.user"
+	err := testingutil.EnsureUserHasNPods(s.GlobalConfig.TestUser, 1)
+	if err != nil {
+		t.Fatalf("Couldn't ensure user has pods: %s", err.Error())
+	}
+	err = testingutil.EnsureUserHasNPods(otherUserID, 1)
+	if err != nil {
+		t.Fatalf("Couldn't ensure user has pods: %s", err.Error())
+	}
+	testPods := func(userID string) {
+		u := managed.NewUser(userID, s.Client, s.GlobalConfig)
+		podList, err := u.ListPods()
+		if err != nil {
+			t.Fatalf("Couldn't list pods: %s", err.Error())
+		}
+		for _, pod := range podList {
+			ip := pod.Object.Status.PodIP
+			localRequest := GetPodIPOwnerRequest{
+				PodIP: ip,
+				RemoteIP: s.GlobalConfig.TestingHost,
+			}
+			returnedUserID := s.getPodIPOwner(localRequest)
+			if returnedUserID != userID {
+				t.Fatalf("Pod %s has IP %s and owner %s but server.getPodIPOwner returned %s", pod.Object.Name, ip, userID, returnedUserID)
+			}
+		}
+	}
+	testPods(s.GlobalConfig.TestUser)
+	testPods(otherUserID)
+}
