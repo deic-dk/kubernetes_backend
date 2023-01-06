@@ -4,6 +4,7 @@ go 1.18
 
 require (
 	github.com/spf13/viper v1.13.0
+	go.uber.org/goleak v1.2.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.19.0
 	k8s.io/apimachinery v0.19.0

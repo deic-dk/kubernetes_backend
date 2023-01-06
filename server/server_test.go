@@ -15,10 +15,17 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/testingutil"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
+	"go.uber.org/goleak"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
+
+func TestMain(m *testing.M) {
+	s := newServer()
+	time.Sleep(s.GlobalConfig.TimeoutDelete + s.GlobalConfig.TimeoutCreate)
+	goleak.VerifyTestMain(m)
+}
 
 func echoEnvVarInPod(pod managed.Pod, envVar string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
