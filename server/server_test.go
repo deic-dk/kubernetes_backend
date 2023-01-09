@@ -23,8 +23,8 @@ import (
 
 func TestMain(m *testing.M) {
 	s := newServer()
-	time.Sleep(s.GlobalConfig.TimeoutDelete + s.GlobalConfig.TimeoutCreate)
-	goleak.VerifyTestMain(m)
+	time.Sleep(3*s.GlobalConfig.TimeoutDelete + s.GlobalConfig.TimeoutCreate)
+	goleak.VerifyTestMain(m, goleak.IgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"))
 }
 
 func echoEnvVarInPod(pod managed.Pod, envVar string) (string, string, error) {
@@ -641,6 +641,13 @@ func TestWatchers(t *testing.T) {
 		}
 		errChan <- nil
 	}()
+	// Now if both behaved correctly, there should be two `nil` errors
+	for i := 0; i < 2; i++ {
+		err := <-errChan
+		if err != nil {
+			t.Fatal(err.Error())
+		}
+	}
 
 	// Make sure the pod was deleted successfully
 	if !finished.Receive() {
@@ -944,7 +951,7 @@ func TestGetPodIPOwner(t *testing.T) {
 		for _, pod := range podList {
 			ip := pod.Object.Status.PodIP
 			localRequest := GetPodIPOwnerRequest{
-				PodIP: ip,
+				PodIP:    ip,
 				RemoteIP: s.GlobalConfig.TestingHost,
 			}
 			returnedUserID := s.getPodIPOwner(localRequest)
