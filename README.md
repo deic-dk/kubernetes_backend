@@ -10,7 +10,7 @@ It receives traffic from sciencedata via an ingress.
 It has a wildcard TLS certificate that allows it to make an ingress for each user pod with a unique subdomain prefix.
 It supports pulling docker images from a local registry.
 Its runtime configuration can be overwritten with environment variables, and stdout is available in kubernetes logs.
-If the backend is restarted, state is recovered, i.e. cached information about the running user pods.
+If the apiserver is restarted, it recovers the state that it would have had (cached tokens for quickly responding to get_pods)
 Tests can be run in a separate namespace without downtime.
 
 ## API
@@ -72,8 +72,13 @@ It assumes that the following are in place already
 
 - kubernetes.io/ingress-nginx ingress controller is installed in the cluster and accessible at a public domain name
 - there is a secret in the sciencedata namespace with a wildcard tls certificate ({data: {tls.crt, tls.key}}) for "*.ingressDomain" for the config value ingressDomain, where podName.ingressDomain is the full domain name that will route to each pod. Wildcard tls certificates can be automatically generated and renewed with cert-manager if you can allow it to add DNS TXT records by API.
-- pod manifests that have a container which mounts a volume called "sciencedata" will be modified to point to the user's storage PVC. If there are other volumes specified, such as read-only software for jupyter, those need to exist already in the sciencedata namespace.
+- pod manifests that have a container which mounts a volume called "sciencedata" will be modified to point to the user's storage PVC. If there are other volumes specified, such as read-only software for jupyter, those need to exist already in the sciencedata and sciencedata-dev namespaces.
 - if you want to support pod manifests that pull images from a private docker registry, they should be written with spec.containers[].image: LOCALREGISTRY/imageName. Then the configuration value for localRegistryURL will replace LOCALREGISTRY in the image string. If the docker registry requires credentials, then a secret with those credentials needs to be present in the sciencedata namespace with the name equal to the localRegistrySecret config value.
+
+### Steps to deploy, given the above
+- Build the docker image. In the project directory `docker build -t dockerregistry.sciencedata.dk/user_pods_backend .`
+- Push the image `docker push dockerregistry.sciencedata.dk/user_pods_backend`
+- In the control plane of the kubernetes cluster, apply a manifest like the example in manifests/deploy_user_pods_backend.yaml which creates the pod, ingress, and service.
 
 ## Testing
 
@@ -91,12 +96,12 @@ There are extensive unit tests that cover each module. The modules will be brief
 
 ### running tests
 
-Build the docker image using Dockerfile_testing (docker build -f).
-Apply manifests/deploy_user_pods_testing.yaml with the same conditions met as for regular deployment.
-The entrypoint is just sshd, so that one can rsync updated source files easily without rebuilding the image each time.
-The server has to be started manually, e.g. `./main > out &`, and it only works from a shell created by `kubectl exec`
-(environment variables necessary for calling the kubernetes api are set for a `kubectl exec` shell).
-With the server running, then run the unit test for e.g. the server module by `cd server` `go test -v`.
+- In the project directory on your development machine, build the testing docker image using Dockerfile_testing (`docker build -f Dockerfile_testing -t dockerregistry.sciencedata.dk/user_pods_backend_testing .`) and then push it (`docker push dockerregistry.sciencedata.dk/user_pods_backend_testing`).
+- Ensure the kubernetes cluster has the components necessary for deployment (wildcard TLS certificate, ingress controller, docker registry credentials)
+- In the kubernetes cluster, apply a manifest to create the testing pod, ingress, and services, as in the example manifests/deploy_user_pods_testing.yaml
+- Log in to the testing container from the control plane `kubectl exec -it -n sciencedata-dev user-pods-backend-testing -- bash`
+- Start the server `./main > out &`. It doesn't start automatically, because the intention is to be able to rsync changes, rebuild `main`, and continue testing without rebuilding the docker image. **NB** This can't be run over SSH because `kubectl exec` sets some environment variables to make this work. Only use SSH for rsync.
+- With the server running, then run the unit test for e.g. the server module by `cd server` `go test -v`.
 
 **Note: The server has to be running for the unit tests to work.**
 This is not the norm for golang unit tests, but is necessary for this use case because many of the components can only
@@ -104,6 +109,16 @@ be tested dynamically (with pods being created/deleted).
 The dependency graph must be acyclic, so e.g. the managed module cannot import the podcreator module for testing.
 Instead, it imports testingutil to make http requests to ./main running on localhost to create the pods, 
 then tests functions within its scope on the running pods.
+
+#### Goroutine leaks
+
+The util.ReadyChannel type was carefully written to avoid causing goroutine leaks (instances of a goroutine that never terminates despite no longer being needed).
+The unit tests ensure that this is the case by running `goleak.VerifyTestMain`,
+which checks whether there are any unterminated goroutines after all the tests have finished running.
+In order to avoid this catching a ReadyChannel whose timeout just hasn't finished,
+a test was added to sleep for long enough to avoid this.
+Note that if you run only some of the tests in the test suite (`go test -run TestCreatePod`),
+it will check for still-running goroutines without having let ReadyChannels time out, which should not alarm you.
 
 ## Configuration
 
@@ -118,10 +133,11 @@ For each variable, if there is set an environment variable in all caps prefixed 
 - namespace: the namespace where pods and other resources should be created. Needs to match the namespace where the backend's serviceAccount has permissions and where necessary secrets exist.
 - podCacheDir: directory in the backend's local filesystem where podcaches should be stored. The directory needs to exist.
 - whitelistManifestRegex: a regex that the yaml_url in a create_pod request must match in order to be used. Because users could manually create a request with an arbitrary yaml_url, this should be used to restrict to manifests controlled by the operators.
-- tokenByteLimit: maximum number of bytes that will be copied for tokens. It is possible for a user to modify the files from which tokens are copied, and this prevents a simple type DoS attack by filling up a file with lots of data.
+- tokenByteLimit: maximum number of bytes that will be copied for tokens. It is possible for a user to modify the files from which tokens are copied, and setting this limit prevents a simple type DoS attack by filling up a file with lots of data.
 - nfsStorageRoot: the path prefix before the user_id that should be used in creating nfs persistent volumes.
 - testingHost: IP address where nfs storage is available for testing. Normally, the server gets the silo IP address from the http request, but when testing, the request comes from localhost.
 - localRegistryURL: string to replace "LOCALREGISTRY" in pod.spec.containers[].image of the pod manifest
 - localRegistrySecret: name of the secret in the namespace that contains auth credentials to pull from the local docker registry if needed
 - ingressDomain: domain suffix for pods. For example, if "pods.sciencedata.dk", then ingresses will be created for "podName.pods.sciencedata.dk", and a wildcard tls cert needs to be available for "*.pods.sciencedata.dk"
 - ingressWildCardSecret: name of the kubernetes secret in the sciencedata namespace that contains the wildcard tls cert.
+- hostnameList: list of e.g. {hostname: silo7.sciencedata.dk, address: 10.0.0.20}, so that podCreator can set `HOME_SERVER_HOSTNAME` and `HOME_SERVER_IP` environment variables in the pod based only on the source IP address of the request.
