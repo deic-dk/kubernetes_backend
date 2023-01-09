@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
@@ -624,7 +625,7 @@ func (s *Server) ServeDeleteAllUserPods(w http.ResponseWriter, r *http.Request) 
 	var response DeleteAllPodsResponse
 	if validUserID(request.UserID) {
 		// give a long enough timout that it will accommodate slowly deleting PV/PVC in worst case
-		finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
+		finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete + 30*time.Second)
 		err := s.deleteAllUserPods(request.UserID, finished)
 		if err != nil {
 			response.Deleted = false
@@ -746,7 +747,7 @@ func (s *Server) ServeCleanAllUnused(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Clean all request from IP %s", remoteIP)
 	// Could limit this to a whitelisted IP range
 
-	finished := util.NewReadyChannel(3 * s.GlobalConfig.TimeoutDelete)
+	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete + 30*time.Second)
 	err := s.cleanAllUnused(finished)
 	status := http.StatusOK
 	if err != nil {

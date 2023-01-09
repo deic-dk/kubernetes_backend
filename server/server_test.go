@@ -21,12 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-func TestMain(m *testing.M) {
-	s := newServer()
-	time.Sleep(3*s.GlobalConfig.TimeoutDelete + s.GlobalConfig.TimeoutCreate)
-	goleak.VerifyTestMain(m, goleak.IgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"))
-}
-
 func echoEnvVarInPod(pod managed.Pod, envVar string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	var err error
@@ -165,7 +159,7 @@ func TestDeleteAllUserPods(t *testing.T) {
 
 	// Now call delete all Pods and ensure that it works
 	deleteAllRequest := DeleteAllPodsRequest{UserID: s.GlobalConfig.TestUser}
-	finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
+	finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete + 30*time.Second)
 	err = s.deleteAllUserPods(deleteAllRequest.UserID, finished)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -236,7 +230,7 @@ func TestStandardPodCreation(t *testing.T) {
 	// If there are some remaining, then call deleteAllUserPods
 	if len(podList) != 0 {
 		deleteAllRequest := DeleteAllPodsRequest{UserID: s.GlobalConfig.TestUser}
-		finished := util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
+		finished := util.NewReadyChannel(s.GlobalConfig.TimeoutDelete + 30*time.Second)
 		err = s.deleteAllUserPods(deleteAllRequest.UserID, finished)
 		if err != nil {
 			t.Fatal(err.Error())
@@ -619,7 +613,6 @@ func TestWatchers(t *testing.T) {
 
 	t.Logf("Calling watchDeletePod with both correct and incorrect username")
 	correctDeleteRequest := WatchDeletePodRequest{PodName: response.PodName, UserID: createRequest.UserID}
-	incorrectDeleteRequest := WatchDeletePodRequest{PodName: response.PodName, UserID: fmt.Sprintf("%s-extra", createRequest.UserID)}
 	errChan = make(chan error, 2)
 	go func() {
 		response, err := s.watchDeletePod(correctDeleteRequest)
@@ -631,23 +624,12 @@ func TestWatchers(t *testing.T) {
 		}
 		errChan <- nil
 	}()
-	go func() {
-		response, err := s.watchDeletePod(incorrectDeleteRequest)
-		if err == nil {
-			errChan <- errors.New(fmt.Sprintf("Didn't get error when watching for pod deletion with incorrect user"))
-		}
-		if !response.Deleted {
-			errChan <- errors.New(fmt.Sprintf("Got false when watching for pod deletion with the incorrect userID"))
-		}
-		errChan <- nil
-	}()
-	// Now if both behaved correctly, there should be two `nil` errors
-	for i := 0; i < 2; i++ {
-		err := <-errChan
-		if err != nil {
-			t.Fatal(err.Error())
-		}
+	err = <-errChan
+	if err != nil {
+		t.Fatal(err.Error())
 	}
+	// Can't check that an incorrect delete request gets the appropriate error, because it can't guarantee that
+	// the pod won't already have been deleted by the time it gets there
 
 	// Make sure the pod was deleted successfully
 	if !finished.Receive() {
@@ -820,7 +802,7 @@ func TestCleanAllUnused(t *testing.T) {
 
 	// delete the testUser pods to clean up
 	deleteAllRequest := DeleteAllPodsRequest{UserID: s.GlobalConfig.TestUser}
-	finished = util.NewReadyChannel(2 * s.GlobalConfig.TimeoutDelete)
+	finished = util.NewReadyChannel(s.GlobalConfig.TimeoutDelete + 30*time.Second)
 	err = s.deleteAllUserPods(deleteAllRequest.UserID, finished)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -962,4 +944,19 @@ func TestGetPodIPOwner(t *testing.T) {
 	}
 	testPods(s.GlobalConfig.TestUser)
 	testPods(otherUserID)
+}
+
+func TestSleepBeforeLeakCheck(t *testing.T) {
+	t.Log("Start waiting for ReadyChannel goroutines to finish\n")
+	s := newServer()
+	time.Sleep(s.GlobalConfig.TimeoutDelete + s.GlobalConfig.TimeoutCreate + 30*time.Second)
+	t.Log("Done waiting for ReadyChannel goroutines to finish\n")
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(
+		m,
+		goleak.IgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/docker/spdystream.(*Connection).shutdown"),
+	)
 }

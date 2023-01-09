@@ -137,7 +137,7 @@ func TestPodCreation(t *testing.T) {
 			}
 
 			// Attempt to create
-			ready := util.NewReadyChannel(90 * time.Second)
+			ready := util.NewReadyChannel(u.GlobalConfig.TimeoutCreate)
 			_, err = pc.CreatePod(ready)
 			if err != nil {
 				t.Fatal(err.Error())

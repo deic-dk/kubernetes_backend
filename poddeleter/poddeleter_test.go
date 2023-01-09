@@ -159,7 +159,7 @@ func TestDeletePod(t *testing.T) {
 		}
 
 		// Call for deletion
-		finished := util.NewReadyChannel(90 * time.Second)
+		finished := util.NewReadyChannel(u.GlobalConfig.TimeoutDelete)
 		err = pd.DeletePod(finished)
 		if err != nil {
 			t.Fatal(err.Error())
