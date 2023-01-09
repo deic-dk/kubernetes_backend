@@ -202,7 +202,7 @@ func GetStandardPodRequests() map[string]CreatePodRequest {
 		YamlURL: "https://raw.githubusercontent.com/deic-dk/pod_manifests/testing/jupyter_sciencedata.yaml",
 		UserID:  config.TestUser,
 		Settings: map[string]map[string]string{
-			"jupyter": {"FILE": "", "WORKING_DIRECTORY": "jupyter"},
+			"jupyter": {},
 		},
 		Supplementary: SupplementaryPodInfo{NeedsSsh: false, NeedsIngress: true},
 	}

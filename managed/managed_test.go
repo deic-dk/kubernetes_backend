@@ -13,6 +13,7 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/k8sclient"
 	"github.com/deic.dk/user_pods_k8s_backend/testingutil"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
+	"go.uber.org/goleak"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -468,7 +469,7 @@ func TestIngress(t *testing.T) {
 		response, err := http.Get(fmt.Sprintf("https://%s", testPod.getIngressHost()))
 		if err != nil {
 			failed = err
-			t.Logf("Failed %d time(s), waiting a second to try again", i + 1)
+			t.Logf("Failed %d time(s), waiting a second to try again", i+1)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -478,7 +479,7 @@ func TestIngress(t *testing.T) {
 			failed = nil
 		} else {
 			failed = errors.New(fmt.Sprintf("Http request to testing pod got response code %d", response.StatusCode))
-			t.Logf("Failed %d time(s), waiting a second to try again", i + 1)
+			t.Logf("Failed %d time(s), waiting a second to try again", i+1)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -497,4 +498,19 @@ func TestIngress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't delete testing pod: %s", err.Error())
 	}
+}
+
+func TestSleepBeforeLeakCheck(t *testing.T) {
+	t.Log("Start waiting for ReadyChannel goroutines to finish\n")
+	u := newUser("")
+	time.Sleep(u.GlobalConfig.TimeoutDelete + u.GlobalConfig.TimeoutCreate + 30*time.Second)
+	t.Log("Done waiting for ReadyChannel goroutines to finish\n")
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(
+		m,
+		goleak.IgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/docker/spdystream.(*Connection).shutdown"),
+	)
 }

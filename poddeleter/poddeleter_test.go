@@ -12,6 +12,7 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/testingutil"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
+	"go.uber.org/goleak"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -197,4 +198,19 @@ func TestDeletePod(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSleepBeforeLeakCheck(t *testing.T) {
+	t.Log("Start waiting for ReadyChannel goroutines to finish\n")
+	u := newUser()
+	time.Sleep(u.GlobalConfig.TimeoutDelete + u.GlobalConfig.TimeoutCreate + 30*time.Second)
+	t.Log("Done waiting for ReadyChannel goroutines to finish\n")
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(
+		m,
+		goleak.IgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/docker/spdystream.(*Connection).shutdown"),
+	)
 }

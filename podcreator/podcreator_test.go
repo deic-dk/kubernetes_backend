@@ -12,6 +12,7 @@ import (
 	"github.com/deic.dk/user_pods_k8s_backend/managed"
 	"github.com/deic.dk/user_pods_k8s_backend/testingutil"
 	"github.com/deic.dk/user_pods_k8s_backend/util"
+	"go.uber.org/goleak"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -196,10 +197,25 @@ func TestRegistrySettings(t *testing.T) {
 
 	// Now see whether applyRegistrySettings behaves correctly
 	pc.applyRegistrySettings()
-  if pc.targetPod.Spec.ImagePullSecrets[0].Name != "testingregistrysecret" {
+	if pc.targetPod.Spec.ImagePullSecrets[0].Name != "testingregistrysecret" {
 		t.Fatalf("applyRegistrySettings didn't successfully add the secret.")
 	}
-  if pc.targetPod.Spec.Containers[0].Image != "testingregistryurl/foobar" {
+	if pc.targetPod.Spec.Containers[0].Image != "testingregistryurl/foobar" {
 		t.Fatalf("applyRegistrySettings didn't successfully rewrite the registry url.")
 	}
+}
+
+func TestSleepBeforeLeakCheck(t *testing.T) {
+	t.Log("Start waiting for ReadyChannel goroutines to finish\n")
+	u := newUser()
+	time.Sleep(u.GlobalConfig.TimeoutDelete + u.GlobalConfig.TimeoutCreate + 30*time.Second)
+	t.Log("Done waiting for ReadyChannel goroutines to finish\n")
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(
+		m,
+		goleak.IgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/docker/spdystream.(*Connection).shutdown"),
+	)
 }
