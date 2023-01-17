@@ -15,28 +15,32 @@ Tests can be run in a separate namespace without downtime.
 
 ## API
 
-All requests should be POST with the header "Content-Type: application/json".
-It is assumed that the API is only accessible from the sciencedata network and that the silos always make requests with the correct user_id. 
+All POST requests should be with the header "Content-Type: application/json".
+The reason that so many are POST is a) to make it easy to add fields in the future,
+and b) to easily reuse code in making queries to the apiserver from https://github.com/deic-dk/user_pods.
+It is assumed that the API is only accessible from the sciencedata network and that the silos always make requests with the correct user_id.
 In the included manifest (manifests/deploy_user_pods_backend.yaml), this is accomplished with a hostname whitelist in the ingress, which requires that the kubernetes.io/nginx-ingress controller is running in the cluster.
 
-| Request           | input data                                                                  | response           |
-| ----------------- | --------------------------------------------------------------------------- | ------------------ |
-| /get_pods         | {user_id: string}                                                           | [podInfo]          |
-| /create_pod       | {yaml_url: string, user_id: string, settings: map[string]map[string]string} | {pod_name: string} |
-| /watch_create_pod | {user_id: string, pod_name: string}                                         | {ready: bool}      |
-| /delete_pod       | {user_id: string, pod_name: string}                                         | {requested: bool}  |
-| /watch_delete_pod | {user_id: string, pod_name: string}                                         | {deleted: bool}    |
-| /delete_all_user  | {user_id: string}                                                           | {deleted: bool}    |
+| Request                | input data                                                                  | response           |
+|------------------------|-----------------------------------------------------------------------------|--------------------|
+| POST /get_pods         | {user_id: string}                                                           | [podInfo]          |
+| POST /create_pod       | {yaml_url: string, user_id: string, settings: map[string]map[string]string} | {pod_name: string} |
+| POST /watch_create_pod | {user_id: string, pod_name: string}                                         | {ready: bool}      |
+| POST /delete_pod       | {user_id: string, pod_name: string}                                         | {requested: bool}  |
+| POST /watch_delete_pod | {user_id: string, pod_name: string}                                         | {deleted: bool}    |
+| POST /delete_all_user  | {user_id: string}                                                           | {deleted: bool}    |
+| GET /get_podip_owner   | ?ip=x.x.x.x                                                                 | string             |
+
 
 #### get_pods
 
-the [podInfo] response is a list of dicts for each pod, including 
+the [podInfo] response is a list of dicts for each pod, including
 {pod_name, container_name, image_name, pod_ip, node_ip, owner, age, status, url, tokens, k8s_pod_info}
 
-Tokens is a dict where each key is one of the comma-separated values in metadata.annotations["sciencedata.dk/copy-token"] of the pod's manifest. 
+Tokens is a dict where each key is one of the comma-separated values in metadata.annotations["sciencedata.dk/copy-token"] of the pod's manifest.
 The first container is expected to create a file named /tmp/key, and the value is the content of this file.
 
-k8s_pod_info is a dict for information about related resources. 
+k8s_pod_info is a dict for information about related resources.
 For now, the nodePort of the ssh service is the only value this gets used for.
 
 #### create_pod
@@ -53,17 +57,22 @@ The backend maintains a dict of {pod_name: {user_id, *readyChannel}} both for po
 When the client makes a watch_create_pod request, the backend checks whether there is an entry for that pod_name and if so, whether the user_id matches. If it does, it waits until the readyChannel receives a value, and then replies to the client. This way, the user can be notified right away when a pod reaches Ready state.
 
 Because the client could manually make the request with an arbitrary pod_name, the default returned value of
-watch_create_pod is false, and the defaulte returned value of watch_delete_pod is true, 
+watch_create_pod is false, and the defaulte returned value of watch_delete_pod is true,
 so that the watch functions cannot be abused to get information about whether other users have a pod with the given name.
 
 When a pod is created, once it reaches ready state, the entry is removed from the backend's watch dict.
-In case the user makes a watch_create_pod request after this occurs, the backend checks whether the pod exists and 
+In case the user makes a watch_create_pod request after this occurs, the backend checks whether the pod exists and
 returns true if so.
 
 #### delete_all_user
 
 Delete's all of the users' pods, storage, and other associated resources.
 Not implemented in the frontend, but often convenient for manually cleaning up.
+
+#### get_podip_owner
+
+Returns the full username (e.g. user@dtu.dk) of the owner of the pod with the specified IP address to allow for
+passwordless authentication on the internal network.
 
 ## Deployment
 
@@ -82,7 +91,7 @@ It assumes that the following are in place already
 
 ## Testing
 
-There are extensive unit tests that cover each module. The modules will be briefly explained 
+There are extensive unit tests that cover each module. The modules will be briefly explained
 
 ### modules
 
@@ -107,7 +116,7 @@ There are extensive unit tests that cover each module. The modules will be brief
 This is not the norm for golang unit tests, but is necessary for this use case because many of the components can only
 be tested dynamically (with pods being created/deleted).
 The dependency graph must be acyclic, so e.g. the managed module cannot import the podcreator module for testing.
-Instead, it imports testingutil to make http requests to ./main running on localhost to create the pods, 
+Instead, it imports testingutil to make http requests to ./main running on localhost to create the pods,
 then tests functions within its scope on the running pods.
 
 #### Goroutine leaks
@@ -122,11 +131,11 @@ it will check for still-running goroutines without having let ReadyChannels time
 
 ## Configuration
 
-The default configuration is in config.yaml which is included in the docker image. 
+The default configuration is in config.yaml which is included in the docker image.
 For each variable, if there is set an environment variable in all caps prefixed with backend (e.g. ingressDomain -> BACKEND_INGRESSDOMAIN), then the value of the environment variable will be used instead of config.yaml. This allows for changing the configuration via the manifest without rebuilding the docker image.
 
 ### Values
- 
+
 - defaultRestartPolicy: must be a valid pod.spec.restartPolicy, "Always", "Never", "OnFailure", sets the default but will not overwrite if the restartPolicy is explicitly defined in a pod's manifest.
 - timeoutCreate: timeout for pod creation, in the format of time.Duration (e.g. "90s" or "1h2m3s"). If the timeout is reached before the pod reaches Ready state, then the pod and associated resources will be deleted. Note that if there is a new version of the docker image, it needs to be pulled within the timeout. As long neither the timeout nor Ready state has been reached, watch_create_pod will not get a response.
 - timeoutDelete: timeout to wait for pod deletion before giving up. If the timeout is reached, then deletion jobs like cleaning up related resources won't be performed.
