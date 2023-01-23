@@ -17,3 +17,5 @@ testUser: "registeredtest7"
 hostnameList:
   - hostname: silo7.sciencedata.dk
     address: 10.0.0.20
+  - hostname: silo1.sciencedata.dk
+    address: 10.0.0.14

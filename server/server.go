@@ -766,13 +766,19 @@ func (s *Server) ServeCleanAllUnused(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getPodIPOwner(request GetPodIPOwnerRequest) string {
 	listOptions := metav1.ListOptions{FieldSelector: fmt.Sprintf("status.podIP=%s", request.PodIP)}
-	podList, err := s.Client.ListPods(listOptions)
-	if err != nil {
-		fmt.Printf("Error listing pods for getPodIPOwner, requested IP %s: %s", request.PodIP, err.Error())
-		return ""
-	}
-	if len(podList.Items) > 0 {
-		return util.GetUserIDFromLabels(podList.Items[0].Labels)
+	// Try every 0.5s up to 4.5s
+	// With an ubuntu image in the testcluster, this works after ~0.7s, so 4.5s should be sufficient
+	// while still less than the default timeout of cURL
+	for i := 0; i < 9; i++ {
+		podList, err := s.Client.ListPods(listOptions)
+		if err != nil {
+			fmt.Printf("Error listing pods for getPodIPOwner, requested IP %s: %s", request.PodIP, err.Error())
+			return ""
+		}
+		if len(podList.Items) > 0 {
+			return util.GetUserIDFromLabels(podList.Items[0].Labels)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	return ""
 }
