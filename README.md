@@ -60,9 +60,9 @@ Because the client could manually make the request with an arbitrary pod_name, t
 watch_create_pod is false, and the defaulte returned value of watch_delete_pod is true,
 so that the watch functions cannot be abused to get information about whether other users have a pod with the given name.
 
-When a pod is created, once it reaches ready state, the entry is removed from the backend's watch dict.
+When a pod is created, once it reaches ready state, the entry is removed from the backend's dict of creating pods to watch.
 In case the user makes a watch_create_pod request after this occurs, the backend checks whether the pod exists and
-returns true if so.
+returns true iff it exists and is owned by the user.
 
 #### delete_all_user
 
@@ -85,6 +85,7 @@ It assumes that the following are in place already
 - if you want to support pod manifests that pull images from a private docker registry, they should be written with spec.containers[].image: LOCALREGISTRY/imageName. Then the configuration value for localRegistryURL will replace LOCALREGISTRY in the image string. If the docker registry requires credentials, then a secret with those credentials needs to be present in the sciencedata namespace with the name equal to the localRegistrySecret config value.
 
 ### Steps to deploy, given the above
+- In the project directory, compile main.go `go build main.go`
 - Build the docker image. In the project directory `docker build -t dockerregistry.sciencedata.dk/user_pods_backend .`
 - Push the image `docker push dockerregistry.sciencedata.dk/user_pods_backend`
 - In the control plane of the kubernetes cluster, apply a manifest like the example in manifests/deploy_user_pods_backend.yaml which creates the pod, ingress, and service.
@@ -136,13 +137,13 @@ For each variable, if there is set an environment variable in all caps prefixed 
 
 ### Values
 
-- defaultRestartPolicy: must be a valid pod.spec.restartPolicy, "Always", "Never", "OnFailure", sets the default but will not overwrite if the restartPolicy is explicitly defined in a pod's manifest.
-- timeoutCreate: timeout for pod creation, in the format of time.Duration (e.g. "90s" or "1h2m3s"). If the timeout is reached before the pod reaches Ready state, then the pod and associated resources will be deleted. Note that if there is a new version of the docker image, it needs to be pulled within the timeout. As long neither the timeout nor Ready state has been reached, watch_create_pod will not get a response.
+- defaultRestartPolicy: must be a valid pod.spec.restartPolicy ("Always", "Never", or "OnFailure"). This sets the default but will not overwrite if the restartPolicy is explicitly defined in a pod's manifest.
+- timeoutCreate: timeout for pod creation, in the format of time.Duration (e.g. "90s" or "1h2m3s"). If the timeout is reached before the pod reaches Ready state, then the pod and associated resources will be deleted. Note that if there is a new version of the docker image, it can take some time to pull, which can trigger the timeout the first time a pod is created with the updated image. As long as neither the timeout nor Ready state has been reached, watch_create_pod will not get a response.
 - timeoutDelete: timeout to wait for pod deletion before giving up. If the timeout is reached, then deletion jobs like cleaning up related resources won't be performed.
 - namespace: the namespace where pods and other resources should be created. Needs to match the namespace where the backend's serviceAccount has permissions and where necessary secrets exist.
 - podCacheDir: directory in the backend's local filesystem where podcaches should be stored. The directory needs to exist.
 - whitelistManifestRegex: a regex that the yaml_url in a create_pod request must match in order to be used. Because users could manually create a request with an arbitrary yaml_url, this should be used to restrict to manifests controlled by the operators.
-- tokenByteLimit: maximum number of bytes that will be copied for tokens. It is possible for a user to modify the files from which tokens are copied, and setting this limit prevents a simple type DoS attack by filling up a file with lots of data.
+- tokenByteLimit: maximum number of bytes that will be copied for tokens. It is possible for a user to modify the files from which tokens are copied, and setting this limit prevents a simple DoS attack by writing arbitrarily large data to that file.
 - nfsStorageRoot: the path prefix before the user_id that should be used in creating nfs persistent volumes.
 - testingHost: IP address where nfs storage is available for testing. Normally, the server gets the silo IP address from the http request, but when testing, the request comes from localhost.
 - localRegistryURL: string to replace "LOCALREGISTRY" in pod.spec.containers[].image of the pod manifest
